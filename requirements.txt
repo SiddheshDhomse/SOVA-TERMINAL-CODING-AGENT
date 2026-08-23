@@ -1,0 +1,6 @@
+openai
+rich
+prompt_toolkit
+datasets
+sb-cli
+python-dotenv

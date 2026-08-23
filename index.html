@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIMPLE CALCULATOR MADE BY SOVA</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>SIMPLE CALCULATOR MADE BY SOVA</h1>
+        <div class="toggle-container">
+            <button id="themeToggle" onclick="toggleTheme()">🌙</button>
+        </div>
+    </header>
+    <div class="calculator">
+        <input type="text" id="display" disabled>
+        <div class="keys">
+            <button class="operator" onclick="clearDisplay()">C</button>
+            <button onclick="appendToDisplay('/')" class="operator">/</button>
+            <button onclick="appendToDisplay('*')" class="operator">*</button>
+            <button onclick="appendToDisplay('-')" class="operator">-</button>
+            <button onclick="appendToDisplay('7')" class="num">7</button>
+            <button onclick="appendToDisplay('8')" class="num">8</button>
+            <button onclick="appendToDisplay('9')" class="num">9</button>
+            <button onclick="appendToDisplay('+')" class="operator">+</button>
+            <button onclick="appendToDisplay('4')" class="num">4</button>
+            <button onclick="appendToDisplay('5')" class="num">5</button>
+            <button onclick="appendToDisplay('6')" class="num">6</button>
+            <button onclick="appendToDisplay('1')" class="num">1</button>
+            <button onclick="appendToDisplay('2')" class="num">2</button>
+            <button onclick="appendToDisplay('3')" class="num">3</button>
+            <button onclick="appendToDisplay('0')" class="num zero">0</button>
+            <button onclick="calculate()" class="equals">=</button>
+            <button onclick="deleteLast()" class="operator">←</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+[project]
+name = "sova"
+version = "0.1.0"
+description = "Sova: a terminal coding agent with Groq/Ollama support"
+requires-python = ">=3.9"
+dependencies = [
+    "openai",
+    "rich",
+    "prompt_toolkit",
+    "python-dotenv",
+    "datasets",
+    "sb-cli",
+]
+
+[project.scripts]
+sova = "agent.cli:main"
+sova-web = "agent.web:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agent"]
