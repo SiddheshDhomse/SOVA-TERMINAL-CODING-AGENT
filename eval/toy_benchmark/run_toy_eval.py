@@ -27,12 +27,20 @@ def run_one(task_def):
         passed = result.returncode == 0 and "OK" in result.stdout
         return passed, result.stdout + result.stderr
     finally:
+        try:
+            from agent.logger import close_logger
+            close_logger()
+        except Exception:
+            pass
         shutil.rmtree(root, ignore_errors=True)
 
 
 def main():
+    import time
     load_dotenv()
-    for task_def in TASKS:
+    for i, task_def in enumerate(TASKS):
+        if i > 0:
+            time.sleep(2)
         passed, output = run_one(task_def)
         print(f"[{'PASS' if passed else 'FAIL'}] {task_def['id']}")
         if not passed:

@@ -27,6 +27,8 @@ htmlcov/
 
 # Local agent state / cache
 .sova/
+# Credentials contain secrets – never commit
+.sova/credentials.json
 
 # IDE
 .vscode/

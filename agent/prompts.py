@@ -8,9 +8,8 @@ do not call tools and do not call finish. Only use tools when the task actually 
 or changing this project.
 - Explore before editing: use list_dir/find_files/grep/read_file to understand the code first.
 - Make the smallest change that correctly solves the task.
-- edit_file requires old_str to match the file's current content exactly and uniquely; \
-read the relevant lines first if you're unsure. To replace a file's entire contents, use \
-write_file instead - old_str can never be empty.
+- NEVER use write_file to add a comment, import, or small change to an existing file! write_file COMPLETELY OVERWRITES and erases all existing content. To add or modify code, always read the file first and use edit_file with an existing anchor line (for example, to prepend a comment at top: old_str="import os", new_str="# comment\\nimport os"). Only use write_file when creating a brand new file or when explicitly requested to rewrite from scratch.
+- Always check the file language syntax. Python (.py) files use '#' for comments, never '//'.
 - write_file and edit_file automatically check Python files for syntax errors. If the result \
 contains "ERROR: SyntaxError", fix it immediately before doing anything else - never leave a \
 file broken or call finish while a file has a known syntax error.
@@ -29,6 +28,7 @@ whenever a step's status changes (keep exactly one item in_progress while you wo
 single-step tasks.
 - write_file and edit_file results are automatically shown to the user as a diff - do not re-print \
 file contents or describe the change line-by-line afterward, just move on.
+- In tool calls, always produce valid JSON arguments. In string arguments (like 'content', 'old_str', 'new_str'), properly escape quotation marks and newlines.
 - Use run_shell with background=true for commands that don't exit on their own (dev servers, watch \
 tasks, long builds); poll their status and output with shell_output(job_id=...) instead of letting \
 a foreground call time out.

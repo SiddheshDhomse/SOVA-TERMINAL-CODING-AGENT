@@ -1,17 +1,34 @@
-"""The agentic tool-calling loop shared by interactive use and batch SWE-bench runs."""
+"""The agentic tool-calling loop shared by interactive use, web console, and evaluation runs."""
 import inspect
 import json
+import time
 
-from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, BadRequestError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    AuthenticationError,
+    BadRequestError,
+    RateLimitError,
+)
 
 from . import sessions
-from .llm import chat, chat_stream, get_model, get_provider, normalize_model
+from .llm import (
+    chat,
+    chat_stream,
+    estimate_tokens,
+    get_model,
+    get_provider,
+    get_token_budget,
+    normalize_model,
+)
+from .logger import SessionTrajectoryLogger, log_error, log_info, log_warn
 from .prompts import SYSTEM_PROMPT
-from .tools import build_tools
+from .tools import build_tools, cleanup_jobs
 
 _SENSITIVE_TOOLS = {"write_file", "edit_file", "run_shell"}
-_COMPACT_THRESHOLD = 40  # message count that triggers summarizing older turns
-_COMPACT_KEEP_RECENT = 16  # messages to always leave verbatim
+_COMPACT_THRESHOLD = 30  # message count threshold
+_COMPACT_KEEP_RECENT = 12  # messages to preserve verbatim
 
 _SPAWN_SUBAGENT_SCHEMA = {
     "type": "function",
@@ -40,8 +57,7 @@ Reply with exactly one word: CHAT or TASK."""
 
 
 def _is_chat(task, model):
-    """Decide up front whether `task` is plain conversation or a real coding task, so a model
-    that ignores prompt instructions can't turn a question into pointless tool calls."""
+    """Decide up front whether `task` is plain conversation or a real coding task."""
     try:
         response = chat(
             [{"role": "system", "content": _CLASSIFY_SYSTEM}, {"role": "user", "content": task}],
@@ -49,14 +65,37 @@ def _is_chat(task, model):
         )
         return (response.choices[0].message.content or "").strip().upper().startswith("CHAT")
     except Exception:
-        return False  # on any classification failure, fall back to the full tool-calling loop
+        return False
 
 
-def _maybe_compact(messages, model):
-    """Summarize older turns into a single system message once the conversation gets long,
-    so sessions don't silently blow past the model's context window. Only cuts right before a
-    'user' message boundary so tool_calls/tool-result pairs are never split."""
-    if len(messages) <= _COMPACT_THRESHOLD:
+def _force_compact(messages):
+    """Emergency compaction: keep system prompt and last few messages to escape HTTP 413 TPM limits."""
+    if len(messages) <= 4:
+        return messages
+    lead = 0
+    while lead < len(messages) and messages[lead]["role"] == "system":
+        lead += 1
+    recent = messages[-6:]
+    # Ensure recent starts at a user message to prevent dangling tool responses
+    while recent and recent[0]["role"] not in ("user", "system"):
+        recent = recent[1:]
+    if not recent:
+        recent = messages[-2:]
+    return (
+        messages[:lead]
+        + [{"role": "system", "content": "[Notice: Context pruned aggressively to stay within rate/TPM limits]"}]
+        + recent
+    )
+
+
+def _maybe_compact(messages, model, tools=None):
+    """Summarize older turns safely without cutting raw JSON or breaking tool_call pairs."""
+    provider = get_provider()
+    requested_model = normalize_model(model) or get_model()
+    budget = get_token_budget(provider, requested_model)
+    est_tokens = estimate_tokens(messages, tools)
+
+    if est_tokens <= int(budget * 0.82) and len(messages) <= _COMPACT_THRESHOLD:
         return messages
 
     lead = 0
@@ -67,39 +106,58 @@ def _maybe_compact(messages, model):
     while idx < len(messages) and messages[idx]["role"] != "user":
         idx += 1
     if idx >= len(messages) - 1:
-        return messages  # not enough room to safely cut this round
+        # If still can't cut at a user message, try an earlier turn
+        idx = max(lead, len(messages) - 6)
+        while idx < len(messages) and messages[idx]["role"] != "user":
+            idx += 1
+        if idx >= len(messages) - 1:
+            return _force_compact(messages) if est_tokens > budget else messages
 
     to_summarize = messages[lead:idx]
     try:
-        transcript = json.dumps(to_summarize)[:12000]
+        # Format clean text transcript instead of slicing raw JSON
+        text_lines = []
+        for m in to_summarize:
+            r = m.get("role")
+            c = m.get("content") or ""
+            if r == "user":
+                text_lines.append(f"User: {c[:400]}")
+            elif r == "assistant":
+                tcs = m.get("tool_calls")
+                if tcs:
+                    t_names = [tc.get("function", {}).get("name", "tool") for tc in tcs]
+                    text_lines.append(f"Assistant called tools: {', '.join(t_names)}")
+                if c:
+                    text_lines.append(f"Assistant: {c[:400]}")
+            elif r == "tool":
+                text_lines.append(f"Tool output: {str(c)[:250]}")
+        transcript = "\n".join(text_lines)[:4500]
+
         response = chat(
             [
                 {
                     "role": "system",
-                    "content": "Summarize this agent conversation excerpt concisely, preserving key "
-                               "facts, decisions, and file paths mentioned. Output plain text only.",
+                    "content": "Summarize this conversation excerpt concisely, preserving key facts, "
+                               "decisions, and file paths. Output plain text only.",
                 },
                 {"role": "user", "content": transcript},
             ],
             tools=None, model=model,
         )
         summary = response.choices[0].message.content or "(summary unavailable)"
-    except Exception:
-        return messages  # never let a failed summarization block the loop
+    except Exception as exc:
+        log_warn(f"Summarization error: {exc}")
+        summary = "Earlier conversation pruned to preserve context budget."
 
     return (
         messages[:lead]
-        + [{"role": "system", "content": f"Earlier conversation summary: {summary}"}]
+        + [{"role": "system", "content": f"Earlier conversation summary:\n{summary}"}]
         + messages[idx:]
     )
 
 
 def _safe_chat(messages, tools, model, emit):
-    """Call the LLM, streaming content tokens out via emit('thinking_delta', ...). Returns (response, err, retry_hint):
-    - success: (response, None, None)
-    - fatal error (auth/connection/rate-limit/other bad request): (None, err_result_dict, None)
-    - recoverable malformed tool call (e.g. Groq tool_use_failed): (None, None, hint_text)
-    """
+    """Call LLM with streaming and robust error handling for Groq TPM 413 and malformed calls."""
     def on_delta(text):
         emit("thinking_delta", text=text)
 
@@ -122,30 +180,60 @@ def _safe_chat(messages, tools, model, emit):
             f"Try again shortly, or switch with '/provider ollama'."
         )
     except BadRequestError as exc:
-        if exc.code == "tool_use_failed":
+        err_msg = f"{getattr(exc, 'message', '')} {exc} {getattr(exc, 'body', '')}".lower()
+        if exc.code == "tool_use_failed" or "failed to parse tool call" in err_msg or "tool call argument" in err_msg:
             return _malformed_tool_call_retry(emit)
-        summary = _format_model_error(exc.message, requested_model) or f"[ERROR] {get_provider()} rejected the request: {exc.message}"
+        summary = _format_model_error(getattr(exc, "message", None), requested_model) or f"[ERROR] {get_provider()} rejected the request: {exc}"
     except APIStatusError as exc:
-        # Catch-all for any HTTP-status error the SDK doesn't have a dedicated subclass for
-        # (e.g. Groq's 413 "request too large for TPM limit") - without this the whole process
-        # crashes instead of ending the turn gracefully.
         body = exc.body if isinstance(exc.body, dict) else {}
         detail = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else None
-        summary = _format_model_error(detail or exc.message, requested_model)
+        err_msg = f"{detail} {getattr(exc, 'message', '')} {exc}".lower()
+
+        # Detect Groq HTTP 413 or tokens-per-minute rate limit
+        if exc.status_code == 413 or "tokens per minute" in err_msg or "tpm" in err_msg:
+            emit(
+                "tool_result",
+                name="(auto-compaction)",
+                result=f"Hit TPM limit ({err_msg[:120]}). Auto-pruning context to retry under quota...",
+            )
+            return None, None, "__FORCE_COMPACT_RETRY__"
+
+        if "failed to parse tool call" in err_msg or "tool call argument" in err_msg or "tool_use_failed" in err_msg:
+            return _malformed_tool_call_retry(emit)
+
+        summary = _format_model_error(err_msg, requested_model)
         if summary is None:
             summary = (
-                f"[ERROR] {get_provider()} rejected the request (HTTP {exc.status_code}): "
-                f"{detail or exc.message}. Try a shorter task, '/new' to reset context, or switch "
-                f"provider/model."
+                f"[ERROR] {get_provider()} rejected request (HTTP {exc.status_code}): {err_msg}. "
+                f"Try switching to a model with higher TPM (e.g. '/model llama-3.3-70b-versatile' or '/provider ollama')."
             )
     except APIError as exc:
-        # Broadest fallback: some providers (e.g. Groq) raise a plain APIError mid-stream, with no
-        # HTTP response attached, when the model emits a tool call that fails schema validation
-        # (e.g. a missing required argument) - treat that as recoverable instead of a fatal crash.
-        message = str(exc)
-        if "tool call validation failed" in message.lower() or "did not match schema" in message.lower():
+        message = f"{exc} {getattr(exc, 'message', '')} {getattr(exc, 'body', '')}".lower()
+        if (
+            "tool call validation failed" in message
+            or "did not match schema" in message
+            or "failed to parse tool call" in message
+            or "tool call argument" in message
+            or "tool_use_failed" in message
+        ):
             return _malformed_tool_call_retry(emit)
-        summary = f"[ERROR] {get_provider()} error: {message}"
+        if "413" in message or "tokens per minute" in message:
+            return None, None, "__FORCE_COMPACT_RETRY__"
+        summary = f"[ERROR] {get_provider()} error: {exc}"
+    except Exception as exc:
+        message = f"{exc} {getattr(exc, 'message', '')}".lower()
+        if (
+            "tool call validation failed" in message
+            or "did not match schema" in message
+            or "failed to parse tool call" in message
+            or "tool call argument" in message
+            or "tool_use_failed" in message
+        ):
+            return _malformed_tool_call_retry(emit)
+        if "413" in message or "tokens per minute" in message:
+            return None, None, "__FORCE_COMPACT_RETRY__"
+        summary = f"[ERROR] Unexpected error from {get_provider()}: {exc}"
+
     emit("error", message=summary)
     return None, {"messages": messages, "finished": False, "summary": summary}, None
 
@@ -153,7 +241,6 @@ def _safe_chat(messages, tools, model, emit):
 def _format_model_error(message, requested_model):
     if not message:
         return None
-
     lowered = message.lower()
     if "model_not_found" not in lowered and "does not exist" not in lowered and "do not have access" not in lowered:
         return None
@@ -165,10 +252,9 @@ def _format_model_error(message, requested_model):
     if provider == "groq":
         return (
             f"[ERROR] Groq rejected model '{requested_model}'. "
-            f"Try '/model openai/gpt-oss-120b' or clear SOVA_MODEL to use the default. "
+            f"Try '/model openai/gpt-oss-120b' or '/model llama-3.3-70b-versatile'. "
             f"(Resolved model: '{normalized_requested or suggested}')"
         )
-
     return (
         f"[ERROR] {provider} rejected model '{requested_model}'. "
         f"Try a provider-supported model name or clear SOVA_MODEL to use the default '{suggested}'."
@@ -178,35 +264,101 @@ def _format_model_error(message, requested_model):
 def _malformed_tool_call_retry(emit):
     emit(
         "tool_result", name="(malformed tool call)",
-        result="Model tried to call a tool with invalid or missing arguments; asking it to retry.",
+        result="Model produced malformed or invalid JSON arguments in tool call; automatically retrying with escaping instructions.",
     )
     return None, None, (
-        "Your last tool call was invalid (missing or malformed arguments), so it did not run. "
-        "Re-call the tool with all required arguments filled in correctly, one tool call at a time."
+        "Your previous tool call failed because the arguments were not valid JSON or could not be parsed. "
+        "Please retry your tool call, ensuring that all string arguments (e.g. 'content', 'old_str', 'new_str') "
+        "have quotes and newlines properly JSON-escaped, and invoke only one tool call."
     )
+
+
+def _parse_content_tool_calls(content, known_tool_names):
+    """Detect and parse tool calls emitted as raw text JSON in message.content.
+    
+    This is common in smaller open-source models (e.g. Llama 3 on Ollama) which
+    print JSON objects directly into content instead of using the API tool_calls channel.
+    """
+    if not content or not isinstance(content, str):
+        return []
+
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    class _SyntheticFn:
+        def __init__(self, name, arguments):
+            self.name = name
+            self.arguments = arguments
+
+    class _SyntheticToolCall:
+        def __init__(self, fn):
+            self.id = f"call_{int(time.time() * 1000)}"
+            self.type = "function"
+            self.function = fn
+
+    # Attempt 1: direct parse of entire text as single object or list
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            name = data.get("name") or data.get("tool") or data.get("function")
+            params = data.get("parameters") or data.get("arguments") or data.get("args")
+            if params is None:
+                params = {k: v for k, v in data.items() if k not in {"name", "tool", "function"}}
+            if isinstance(name, str) and name in known_tool_names:
+                args_str = json.dumps(params) if isinstance(params, dict) else str(params)
+                return [_SyntheticToolCall(_SyntheticFn(name, args_str))]
+        elif isinstance(data, list):
+            res = []
+            for item in data:
+                if isinstance(item, dict):
+                    name = item.get("name") or item.get("tool") or item.get("function")
+                    params = item.get("parameters") or item.get("arguments") or item.get("args") or {}
+                    if isinstance(name, str) and name in known_tool_names:
+                        args_str = json.dumps(params) if isinstance(params, dict) else str(params)
+                        res.append(_SyntheticToolCall(_SyntheticFn(name, args_str)))
+            if res:
+                return res
+    except Exception:
+        pass
+
+    # Attempt 2: regex extract JSON objects from text
+    import re
+    candidates = re.findall(r'(\{(?:[^{}]|(?:\{[^{}]*\}))*\})', text)
+    extracted = []
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+            if isinstance(data, dict):
+                name = data.get("name") or data.get("tool") or data.get("function")
+                params = data.get("parameters") or data.get("arguments") or data.get("args")
+                if params is None:
+                    params = {k: v for k, v in data.items() if k not in {"name", "tool", "function"}}
+                if isinstance(name, str) and name in known_tool_names and isinstance(params, dict):
+                    args_str = json.dumps(params)
+                    extracted.append(_SyntheticToolCall(_SyntheticFn(name, args_str)))
+        except Exception:
+            continue
+
+    return extracted
 
 
 def run_agent(
-    root_dir, task, model=None, max_iterations=20, verbose=True, on_event=None, allow_subagents=True,
+    root_dir, task, model=None, max_iterations=25, verbose=True, on_event=None, allow_subagents=True,
     messages=None, stop_event=None, on_permission=None, session_id=None,
 ):
-    """Run the agent on `task` inside `root_dir` until it calls finish or hits max_iterations.
+    """Run the agent on `task` inside `root_dir` until completion, stop, or max_iterations."""
+    trajectory = SessionTrajectoryLogger(root_dir, session_id) if session_id else None
+    log_info(f"Starting agent task in {root_dir} (session={session_id}, provider={get_provider()})", root_dir)
 
-    If `on_event` is given, it is called with dicts like {"type": ..., ...} for each
-    step (thinking/tool_call/tool_result/answer/error) instead of printing directly.
-    `allow_subagents` controls whether the agent may delegate work via `spawn_subagent`;
-    sub-agents themselves run with it disabled to avoid unbounded recursion.
-    `messages` continues an existing conversation (as returned in a previous result's
-    "messages") so follow-up tasks keep context of what was done before; omit it to
-    start a fresh conversation.
-    `stop_event`, if given, is checked between turns and between tool calls; when set the
-    run stops early and returns a "Stopped by user" result.
-    `on_permission(name, args) -> bool`, if given, is asked before running a sensitive tool
-    (write_file/edit_file/run_shell); a False return denies the call.
-    `session_id`, if given, persists the conversation to .sova/sessions/<session_id>.json
-    after every turn via `sessions.save_session` so it can be resumed later.
-    """
     def emit(event_type, **data):
+        if trajectory:
+            trajectory.record_step(event_type, data)
         if on_event:
             on_event({"type": event_type, **data})
         elif verbose:
@@ -218,10 +370,13 @@ def run_agent(
                 sessions.save_session(root_dir, session_id, messages, result)
             except OSError:
                 pass
+        cleanup_jobs()
+        log_info(f"Task finished: session={session_id}, finished={result.get('finished')}", root_dir)
         return result
 
     def _stopped():
         emit("error", message="Stopped by user")
+        cleanup_jobs()
         return _finish({"messages": messages, "finished": False, "summary": "Stopped by user"})
 
     schemas, impls = build_tools(root_dir)
@@ -240,9 +395,8 @@ def run_agent(
             if sub_result["finished"]:
                 return f"[SUBAGENT COMPLETED] {sub_result['summary']}"
             return (
-                f"ERROR: sub-agent did not confirm completion (never called finish). "
-                f"Its last message was: {sub_result['summary']}. Verify what it actually did "
-                f"yourself (e.g. read_file) before trusting or retrying this."
+                f"ERROR: sub-agent did not confirm completion. "
+                f"Last message: {sub_result['summary']}. Verify touched files before proceeding."
             )
 
         schemas = schemas + [_SPAWN_SUBAGENT_SCHEMA]
@@ -271,7 +425,7 @@ def run_agent(
         emit("answer", text=message.content, verified=False)
         return _finish({"messages": messages, "finished": False, "summary": message.content})
 
-    last_failure = None  # (name, args_json) of the last failing tool call
+    last_failure = None
     repeat_count = 0
     did_any_tool_call = False
     nudged_to_finish = False
@@ -281,13 +435,16 @@ def run_agent(
         if stop_event is not None and stop_event.is_set():
             return _stopped()
 
-        messages = _maybe_compact(messages, model)
+        messages = _maybe_compact(messages, model, schemas)
 
         emit("thinking")
         response, err, retry_hint = _safe_chat(messages, schemas, model, emit)
         if err:
             return _finish(err)
         if retry_hint:
+            if retry_hint == "__FORCE_COMPACT_RETRY__":
+                messages = _force_compact(messages)
+                continue
             malformed_retries += 1
             if malformed_retries >= 3:
                 summary = "[ERROR] Model repeatedly failed to produce a valid tool call; stopping."
@@ -300,7 +457,20 @@ def run_agent(
         message = response.choices[0].message
         messages.append(message.model_dump(exclude_none=True))
 
-        if not message.tool_calls:
+        tool_calls = message.tool_calls or []
+        if not tool_calls and message.content:
+            tool_calls = _parse_content_tool_calls(message.content, set(impls.keys()))
+            if tool_calls and "tool_calls" not in messages[-1]:
+                messages[-1]["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in tool_calls
+                ]
+
+        if not tool_calls:
             if did_any_tool_call and not nudged_to_finish:
                 nudged_to_finish = True
                 messages.append({
@@ -314,18 +484,25 @@ def run_agent(
 
         did_any_tool_call = True
         finished_summary = None
-        for tool_call in message.tool_calls:
+        for tool_call in tool_calls:
             name = tool_call.function.name
+            raw_arguments = tool_call.function.arguments or "{}"
             try:
-                args = json.loads(tool_call.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
+                args = json.loads(raw_arguments)
+            except json.JSONDecodeError as decode_err:
+                args = None
+                arg_err_msg = (
+                    f"ERROR: Failed to parse tool call arguments as valid JSON ({decode_err}). "
+                    f"Please re-call '{name}' ensuring quotes and newlines in arguments are properly formatted."
+                )
 
-            emit("tool_call", name=name, args=args)
+            emit("tool_call", name=name, args=args if args is not None else {"_raw": raw_arguments[:200]})
 
             func = impls.get(name)
             diff = None
-            if func is None:
+            if args is None:
+                result = arg_err_msg
+            elif func is None:
                 result = f"ERROR: unknown tool '{name}'"
             elif name in _SENSITIVE_TOOLS and on_permission is not None and not on_permission(name, args):
                 result = "ERROR: user denied this tool call"
@@ -376,7 +553,7 @@ def run_agent(
 
 
 def _print_event(event_type, data):
-    """Default plain-print rendering of agent events, used when no on_event callback is given."""
+    """Default plain-print rendering of agent events."""
     if event_type == "tool_call":
         print(f"[tool] {data['name']}({data['args']})")
     elif event_type == "tool_result":

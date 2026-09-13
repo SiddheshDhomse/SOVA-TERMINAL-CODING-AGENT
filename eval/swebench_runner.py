@@ -42,7 +42,8 @@ def checkout_repo(repo, base_commit, dest):
 
 
 def get_diff(dest):
-    return _run(["git", "diff"], cwd=dest).stdout
+    _run(["git", "add", "-A"], cwd=dest)
+    return _run(["git", "diff", "--cached"], cwd=dest).stdout
 
 
 def main():

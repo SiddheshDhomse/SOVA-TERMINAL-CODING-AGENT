@@ -1,92 +1,139 @@
-# Sova: Terminal Coding Agent + Free SWE-bench Eval
+# SOVA: Autonomous Terminal & Web Coding Agent Harness
 
-A small terminal coding agent (multi-tool, Claude Code/Codex-style) that works with
-Groq's free API or a local Ollama model, plus scripts to learn eval mechanics and
-score the agent on SWE-bench Lite **without Docker** using the official `sb-cli`
-remote evaluation service.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Interface](https://img.shields.io/badge/UI-CLI%20%26%20Web-purple.svg)](#interfaces)
+[![Providers](https://img.shields.io/badge/Providers-Groq%20%7C%20Ollama%20%7C%20Nvidia%20%7C%20OpenAI-orange.svg)](#multi-provider-support)
 
-## Setup
+**SOVA** is an autonomous coding agent harness designed for software engineering benchmarks (SWE-bench style) and everyday development tasks. It delivers a **Claude Code-grade terminal experience** alongside a modern **Web Console** featuring **VS Code / GitHub Copilot-style diff viewing**, multi-provider resilience, and comprehensive observability.
+
+---
+
+## Key Features
+
+### 1. Claude Code-Grade Terminal Interface (`sova`)
+- **Rich Syntax & Diff Previews**: Line-numbered code previews for `write_file`, colorized unified diff previews for `edit_file`, and rendered Markdown responses.
+- **Interactive Decision Prompts**: Permission cards for sensitive tools (`write_file`, `edit_file`, `run_shell`) with quick selection:
+  - `[y] Yes, allow once`
+  - `[a] Always allow sensitive tools for this session`
+  - `[n] No, deny this tool call`
+  - `[c] Cancel task execution`
+- **Destructive Overwrite Guards**: Prominent warnings with line count differences and full diffs whenever `write_file` targets an existing file.
+- **Interactive Slash Commands**: `/provider`, `/model`, `/resume`, `/logs`, `/clear`, and `/help`.
+- **Cross-Platform**: Fully compatible with Windows PowerShell (ASCII-safe encoding fallbacks) and POSIX shells.
+
+### 2. Web Control Console (`sova-web`)
+- **VS Code / GitHub Copilot Diff Viewer**:
+  - **Inline Mode**: Dual line-number gutters (Old Line # and New Line #), change symbols (`+`/`-`), and soft green/red row highlights.
+  - **Split (Side-by-Side) Mode**: Synchronized panes (Original vs Modified) with diagonal stripe alignment placeholders.
+  - **Header Statistics**: Live additions & deletions badge (`+X -Y`), clipboard copy with instant feedback (`✓ Copied!`), and collapsible diff blocks.
+  - **Approval Cards**: Direct diff embedding inside permission approval requests with <kbd>Y</kbd> / <kbd>A</kbd> / <kbd>N</kbd> hotkeys.
+- **Dynamic Provider & Model Switching**: Real-time dropdowns auto-populated from installed Ollama models or remote provider catalogs.
+- **Session Sidebar**: Browse past sessions with timestamps, completion status, and single-click resumption.
+- **Right Inspector Drawer**: Live Todo checklist, touched files registry, and real-time streaming logs.
+
+### 3. Resilient Agent Loop
+- **Adaptive Token Budgeting**: Model-specific budgets (e.g. 5,500 token budget for Groq `openai/gpt-oss-120b` preventing HTTP 413 8,000 TPM limit errors).
+- **Proactive Context Compaction**: Summarizes older conversation turns before hitting API rate limits while strictly preserving tool-call / tool-result message pairings.
+- **Emergency 413 / TPM Intercept**: Auto-catches rate limits, aggressively prunes context, and retries under quota.
+- **Malformed JSON Recovery**: Catches API-level JSON parse failures (`Failed to parse tool call arguments as JSON`) and retries with explicit escaping guidance.
+- **Text-Based Tool Call Parser**: Automatically detects and executes tool calls when smaller open-source models (e.g. Llama 3 on Ollama) output JSON into `message.content` instead of the API tool-calls channel.
+
+### 4. Observability & Trajectory Logging
+- **Rotating System Log**: Central log in `.sova/logs/sova.log` (10MB max, 5 backups).
+- **Structured Trajectories**: Every session records full step-by-step JSONL events in `.sova/logs/<session_id>.trajectory.jsonl` for auditing, evaluation replay, and telemetry.
+- **Persistent Memory**: Project-level conventions and test commands persist across runs in `.sova/memory.md`.
+
+---
+
+## Installation & Setup
 
 ```powershell
+# 1. Clone repository and set up virtual environment
+git clone https://github.com/SiddheshDhomse/SOVA-TERMINAL-CODING-AGENT.git
+cd "SOVA- Terminal Agent"
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+
+# 2. Install dependencies & CLI entrypoints
 pip install -r requirements.txt
-copy .env.example .env
-# edit .env: set SOVA_PROVIDER=groq and GROQ_API_KEY (free key from https://console.groq.com/keys)
-# optional: set SOVA_MODEL=openai/gpt-oss-120b for Groq, or leave it blank for the default
-# or set SOVA_PROVIDER=ollama and make sure `ollama serve` is running with a model pulled
-```
-
-To get a plain `sova` command instead of `python -m agent.cli`, install the project itself:
-
-```powershell
 pip install -e .
-sova
+
+# 3. Configure environment variables
+copy .env.example .env
+# Edit .env:
+# SOVA_PROVIDER=groq
+# GROQ_API_KEY=your_free_groq_api_key_here
 ```
 
-## 1. Use the agent interactively
+---
 
+## Usage
+
+### Terminal CLI (`sova`)
 ```powershell
+# Launch default interactive session
 sova
+
+# Launch with specific provider & model
 sova --provider ollama --model llama3.1:8b
+sova --provider groq --model llama-3.3-70b-versatile
 ```
 
-Type a task (e.g. "create fizzbuzz.py that prints FizzBuzz 1-20"); the agent will
-read/write files and run shell commands in your current directory until it calls
-`finish`. Switch providers mid-session with `/provider groq` or `/provider ollama`,
-and override the model with `/model <name>`.
+### Web Console (`sova-web`)
+```powershell
+# Launch Web Console (opens at http://127.0.0.1:8787)
+sova-web
+# Or specify host and port
+python -m agent.web --port 8787
+```
 
-### Tools available to the agent
+---
 
-`read_file`, `write_file`, `edit_file`, `list_dir`, `find_files` (glob search),
-`grep`, `run_shell`, `memory_read`/`memory_append` (persistent project notes stored
-in `.sova/memory.md`, shared across runs), `spawn_subagent` (delegate an independent
-subtask to a fresh sub-agent loop), and `finish`.
+## Tools Available to the Agent
 
-## 2. Learn evals with the toy benchmark (no Docker, no SWE-bench needed)
+| Tool | Purpose |
+|------|---------|
+| `read_file` | Read file contents with line numbers (capped to conserve token budget). |
+| `write_file` | Create a new file or completely rewrite an existing file (with syntax checks). |
+| `edit_file` | Precision line-bounded replacement of `old_str` with `new_str` using optional `start_line` / `end_line`. |
+| `list_dir` | List files and directories within the project workspace. |
+| `find_files` | Fast glob pattern matching across workspace files. |
+| `grep` | Regex / string search within files using `ripgrep` (fallback to Python). |
+| `run_shell` | Run shell commands (foreground or tracked background dev servers). |
+| `shell_output` | Poll logs from active background shell jobs. |
+| `todo_write` / `todo_read` | Maintain and track multi-step task checklists. |
+| `memory_append` / `memory_read` | Read and update durable project memory in `.sova/memory.md`. |
+| `spawn_subagent` | Proactively delegate independent subtasks to a fresh sub-agent loop. |
+| `finish` | Confirm task completion with a summary of touched files and changes. |
 
+---
+
+## Evaluations & Benchmarking
+
+### 1. Local Toy Benchmark (No Docker required)
 ```powershell
 python -m eval.toy_benchmark.run_toy_eval
 ```
+Runs synthetic bug-fix and implementation challenges in isolated temp directories and validates task completion via shell assertions.
 
-Runs the agent against a couple of handmade bugfix/implement tasks in isolated temp
-folders and checks pass/fail via a plain shell assertion - use this to see how a
-task -> patch -> check pipeline scores before touching SWE-bench.
-
-## 3. Explore the real SWE-bench Lite dataset
-
+### 2. SWE-bench Lite Runner
 ```powershell
-python -m eval.explore_swebench
-```
-
-Prints a few instances' `problem_statement`, `patch`, `FAIL_TO_PASS`/`PASS_TO_PASS`
-fields so you can see exactly what gets scored.
-
-## 4. Generate predictions for a small SWE-bench Lite sample
-
-```powershell
+# Generate prediction patch files for SWE-bench Lite instances
 python -m eval.swebench_runner --instance-ids sympy__sympy-20590 astropy__astropy-14539 --output predictions.jsonl
+
+# Free remote evaluation via sb-cli (no local Docker required):
+sb-cli submit swe-bench_lite test --predictions_path predictions.jsonl --run_id my_run
+sb-cli get-report swe-bench_lite test my_run -o ./reports
 ```
 
-For each instance id this checks out the target repo at `base_commit` into a temp
-dir, runs the agent on the issue's `problem_statement`, and records the resulting
-`git diff` as the prediction. No Docker or repo dependencies are needed here -
-that's only required for scoring, which happens remotely in step 5.
-
-## 5. Score for free via sb-cli (no local Docker)
-
+### 3. Unit Test Suite
 ```powershell
-sb-cli gen-api-key you@example.com
-# verify the code emailed to you:
-sb-cli verify-api-key <code_from_email>
-$env:SWEBENCH_API_KEY = "<your_key>"
-
-# check remaining free quota before submitting
-sb-cli quota swe-bench_lite test
-
-sb-cli submit swe-bench_lite test --predictions_path predictions.jsonl --run_id my_first_run
-sb-cli get-report swe-bench_lite test my_first_run -o ./reports
+python -m unittest discover -s . -p "test_*.py"
 ```
 
-Start with a handful of instance ids (as above) to conserve the free quota while
-you iterate on the agent; scale up once it's working reliably.
+---
+
+## Architecture & Conventions
+
+For a comprehensive technical specification of module contracts, token compaction algorithms, and guidelines for AI coding agents, refer to [`CONTEXT.md`](CONTEXT.md).
