@@ -1,12 +1,30 @@
 """OpenAI-compatible chat wrapper supporting the Groq and Ollama providers."""
 import os
+import re
 
 from openai import OpenAI
 
 DEFAULT_MODELS = {
-    "groq": "llama-3.3-70b-versatile",
+    "groq": "openai/gpt-oss-120b",
     "ollama": "llama3.1:8b",
     "nvidia": "nvidia/nemotron-3.5-lightning-30b-a3b",
+}
+
+MODEL_ALIASES = {
+    "groq": {
+        "gpt oss 120b": "openai/gpt-oss-120b",
+        "gpt-oss 120b": "openai/gpt-oss-120b",
+        "gpt oss-120b": "openai/gpt-oss-120b",
+        "gpt-oss-120b": "openai/gpt-oss-120b",
+        "openai gpt oss 120b": "openai/gpt-oss-120b",
+        "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+        "gpt oss 20b": "openai/gpt-oss-20b",
+        "gpt-oss 20b": "openai/gpt-oss-20b",
+        "gpt-oss-20b": "openai/gpt-oss-20b",
+        "openai/gpt-oss-20b": "openai/gpt-oss-20b",
+        "llama 3.3 70b versatile": "openai/gpt-oss-120b",
+        "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    },
 }
 
 _client = None
@@ -17,8 +35,22 @@ def get_provider() -> str:
     return os.environ.get("SOVA_PROVIDER", "groq").lower()
 
 
+def normalize_model(model: str | None, provider: str | None = None) -> str:
+    if not model:
+        return ""
+
+    provider = (provider or get_provider()).lower()
+    normalized = re.sub(r"[\s_]+", " ", model.strip().lower())
+    normalized = normalized.replace("/", " / ").replace("-", " - ")
+    normalized = re.sub(r"\s+", " ", normalized).replace(" / ", "/").replace(" - ", "-")
+    return MODEL_ALIASES.get(provider, {}).get(normalized, model.strip())
+
+
 def get_model() -> str:
-    return os.environ.get("SOVA_MODEL") or DEFAULT_MODELS.get(get_provider(), "")
+    configured = os.environ.get("SOVA_MODEL")
+    if configured:
+        return normalize_model(configured)
+    return DEFAULT_MODELS.get(get_provider(), "")
 
 
 def get_client() -> OpenAI:
@@ -57,7 +89,7 @@ def chat(messages, tools, model=None):
     client = get_client()
     kwargs = {"tools": tools, "tool_choice": "auto"} if tools else {}
     return client.chat.completions.create(
-        model=model or get_model(),
+        model=normalize_model(model) or get_model(),
         messages=messages,
         temperature=0,
         **kwargs,
@@ -113,7 +145,7 @@ def chat_stream(messages, tools, model=None, on_delta=None):
     client = get_client()
     kwargs = {"tools": tools, "tool_choice": "auto"} if tools else {}
     stream = client.chat.completions.create(
-        model=model or get_model(),
+        model=normalize_model(model) or get_model(),
         messages=messages,
         temperature=0,
         stream=True,

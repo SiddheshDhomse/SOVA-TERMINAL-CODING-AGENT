@@ -5,7 +5,7 @@ import json
 from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, BadRequestError, RateLimitError
 
 from . import sessions
-from .llm import chat, chat_stream, get_provider
+from .llm import chat, chat_stream, get_model, get_provider, normalize_model
 from .prompts import SYSTEM_PROMPT
 from .tools import build_tools
 
@@ -103,8 +103,10 @@ def _safe_chat(messages, tools, model, emit):
     def on_delta(text):
         emit("thinking_delta", text=text)
 
+    requested_model = normalize_model(model) or get_model()
+
     try:
-        return chat_stream(messages, tools=tools, model=model, on_delta=on_delta), None, None
+        return chat_stream(messages, tools=tools, model=requested_model, on_delta=on_delta), None, None
     except AuthenticationError:
         summary = f"[ERROR] Invalid API key for provider '{get_provider()}'. Check your .env file."
     except APIConnectionError:
@@ -122,18 +124,20 @@ def _safe_chat(messages, tools, model, emit):
     except BadRequestError as exc:
         if exc.code == "tool_use_failed":
             return _malformed_tool_call_retry(emit)
-        summary = f"[ERROR] {get_provider()} rejected the request: {exc.message}"
+        summary = _format_model_error(exc.message, requested_model) or f"[ERROR] {get_provider()} rejected the request: {exc.message}"
     except APIStatusError as exc:
         # Catch-all for any HTTP-status error the SDK doesn't have a dedicated subclass for
         # (e.g. Groq's 413 "request too large for TPM limit") - without this the whole process
         # crashes instead of ending the turn gracefully.
         body = exc.body if isinstance(exc.body, dict) else {}
         detail = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else None
-        summary = (
-            f"[ERROR] {get_provider()} rejected the request (HTTP {exc.status_code}): "
-            f"{detail or exc.message}. Try a shorter task, '/new' to reset context, or switch "
-            f"provider/model."
-        )
+        summary = _format_model_error(detail or exc.message, requested_model)
+        if summary is None:
+            summary = (
+                f"[ERROR] {get_provider()} rejected the request (HTTP {exc.status_code}): "
+                f"{detail or exc.message}. Try a shorter task, '/new' to reset context, or switch "
+                f"provider/model."
+            )
     except APIError as exc:
         # Broadest fallback: some providers (e.g. Groq) raise a plain APIError mid-stream, with no
         # HTTP response attached, when the model emits a tool call that fails schema validation
@@ -144,6 +148,31 @@ def _safe_chat(messages, tools, model, emit):
         summary = f"[ERROR] {get_provider()} error: {message}"
     emit("error", message=summary)
     return None, {"messages": messages, "finished": False, "summary": summary}, None
+
+
+def _format_model_error(message, requested_model):
+    if not message:
+        return None
+
+    lowered = message.lower()
+    if "model_not_found" not in lowered and "does not exist" not in lowered and "do not have access" not in lowered:
+        return None
+
+    provider = get_provider()
+    suggested = get_model()
+    normalized_requested = normalize_model(requested_model, provider=provider)
+
+    if provider == "groq":
+        return (
+            f"[ERROR] Groq rejected model '{requested_model}'. "
+            f"Try '/model openai/gpt-oss-120b' or clear SOVA_MODEL to use the default. "
+            f"(Resolved model: '{normalized_requested or suggested}')"
+        )
+
+    return (
+        f"[ERROR] {provider} rejected model '{requested_model}'. "
+        f"Try a provider-supported model name or clear SOVA_MODEL to use the default '{suggested}'."
+    )
 
 
 def _malformed_tool_call_retry(emit):

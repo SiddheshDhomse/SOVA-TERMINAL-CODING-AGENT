@@ -13,6 +13,7 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env
 # edit .env: set SOVA_PROVIDER=groq and GROQ_API_KEY (free key from https://console.groq.com/keys)
+# optional: set SOVA_MODEL=openai/gpt-oss-120b for Groq, or leave it blank for the default
 # or set SOVA_PROVIDER=ollama and make sure `ollama serve` is running with a model pulled
 ```
 

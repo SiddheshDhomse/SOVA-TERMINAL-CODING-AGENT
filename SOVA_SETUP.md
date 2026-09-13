@@ -23,7 +23,7 @@ Run from this directory: `C:\Users\i-Siddhesh.Dhomse\OneDrive - Icertis Solution
 3. Open that file in your editor
 4. Add this line:
 ```powershell
-Set-Alias -Name sova -Value "C:\Users\i-Siddhesh.Dhomse\OneDrive - Icertis Solutions\Desktop\Terminal Agent\sova.bat"
+Set-Alias -Name sova -Value \Desktop\Terminal Agent\sova.bat"
 ```
 5. Save and close
 6. Restart PowerShell
