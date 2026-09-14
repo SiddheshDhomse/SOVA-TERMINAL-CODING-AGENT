@@ -24,6 +24,7 @@ PROVIDERS_CONFIG = {
         "default": "openai/gpt-oss-120b",
         "recommended": [
             "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
             "mixtral-8x7b-32768",
@@ -103,8 +104,13 @@ MODEL_ALIASES = {
         "openai/gpt-oss-120b": "openai/gpt-oss-120b",
         "gpt oss 20b": "openai/gpt-oss-20b",
         "gpt-oss 20b": "openai/gpt-oss-20b",
+        "gpt oss-20b": "openai/gpt-oss-20b",
         "gpt-oss-20b": "openai/gpt-oss-20b",
+        "openai gpt oss 20b": "openai/gpt-oss-20b",
         "openai/gpt-oss-20b": "openai/gpt-oss-20b",
+        "gpt-20b": "openai/gpt-oss-20b",
+        "gpt 20b": "openai/gpt-oss-20b",
+        "20b": "openai/gpt-oss-20b",
         "llama 3.3 70b versatile": "llama-3.3-70b-versatile",
         "llama-3.3-70b-versatile": "llama-3.3-70b-versatile",
         "llama3 70b 8192": "openai/gpt-oss-120b",
@@ -218,6 +224,8 @@ def get_token_budget(provider: Optional[str] = None, model: Optional[str] = None
         # Groq free tier limit on gpt-oss-120b is strictly 8,000 TPM
         if "120b" in mod:
             return 5500
+        elif "20b" in mod:
+            return 12000
         elif "70b" in mod:
             return 9000
         elif "8b" in mod:

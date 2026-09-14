@@ -10,6 +10,14 @@ class TestModelNormalization(unittest.TestCase):
             normalize_model("GPT-OSS 120B", provider="groq"),
             "openai/gpt-oss-120b",
         )
+        self.assertEqual(
+            normalize_model("GPT-OSS 20B", provider="groq"),
+            "openai/gpt-oss-20b",
+        )
+        self.assertEqual(
+            normalize_model("gpt-20b", provider="groq"),
+            "openai/gpt-oss-20b",
+        )
 
     def test_deprecated_groq_model_maps_to_supported_default(self):
         self.assertEqual(

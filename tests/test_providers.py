@@ -22,6 +22,12 @@ class TestProviderConfiguration(unittest.TestCase):
         self.assertIn("gemini", providers)
         self.assertIn("openrouter", providers)
 
+    def test_groq_configuration(self):
+        models = llm.get_models_for_provider("groq")
+        self.assertIn("openai/gpt-oss-120b", models)
+        self.assertIn("openai/gpt-oss-20b", models)
+        self.assertIn("llama-3.3-70b-versatile", models)
+
     def test_gemini_configuration(self):
         self.assertEqual(llm.DEFAULT_MODELS["gemini"], "gemini-2.5-flash")
         models = llm.get_models_for_provider("gemini")
@@ -41,6 +47,7 @@ class TestProviderConfiguration(unittest.TestCase):
     def test_token_budget_resolution(self):
         # Specific Groq model budgets
         self.assertEqual(llm.get_token_budget("groq", "openai/gpt-oss-120b"), 5500)
+        self.assertEqual(llm.get_token_budget("groq", "openai/gpt-oss-20b"), 12000)
         self.assertEqual(llm.get_token_budget("groq", "llama-3.3-70b-versatile"), 9000)
         # Gemini / OpenRouter budgets
         self.assertEqual(llm.get_token_budget("gemini", "gemini-2.5-flash"), 64000)
