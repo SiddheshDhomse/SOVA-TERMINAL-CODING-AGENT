@@ -1,4 +1,4 @@
-# build by SOVA
+# Build by siddhesh using SOVA
 import tkinter as tk
 
 # Tkinter-based simple calculator GUI

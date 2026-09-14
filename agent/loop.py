@@ -1,7 +1,14 @@
 """The agentic tool-calling loop shared by interactive use, web console, and evaluation runs."""
 import inspect
 import json
+import sys
 import time
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 from openai import (
     APIConnectionError,
@@ -24,6 +31,11 @@ from .llm import (
 )
 from .logger import SessionTrajectoryLogger, log_error, log_info, log_warn
 from .prompts import SYSTEM_PROMPT
+from .subagents import (
+    ROLE_GENERAL,
+    filter_tools_for_role,
+    get_role_config,
+)
 from .tools import build_tools, cleanup_jobs
 
 _SENSITIVE_TOOLS = {"write_file", "edit_file", "run_shell"}
@@ -35,14 +47,25 @@ _SPAWN_SUBAGENT_SCHEMA = {
     "function": {
         "name": "spawn_subagent",
         "description": (
-            "Delegate a self-contained subtask to a fresh sub-agent with its own tool-calling loop. "
-            "Use this to break a large task into independent pieces you can solve separately, then "
-            "combine the results yourself. The sub-agent shares this project's persistent memory."
+            "Delegate a self-contained subtask to a specialized sub-agent with its own tool-calling loop. "
+            "Select the appropriate role: "
+            "'researcher' (strictly read-only codebase exploration, symbol lookups, zero edit/shell permissions), "
+            "'coder' (precision code edits, file creation, and local testing), "
+            "'reviewer' (diff inspection and test suite verification with zero code edits), or "
+            "'general' (general execution). Sub-agents cannot recursively spawn child sub-agents."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "subtask": {"type": "string", "description": "A clear, self-contained description of the subtask."},
+                "subtask": {
+                    "type": "string",
+                    "description": "A clear, self-contained description of the subtask.",
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["researcher", "coder", "reviewer", "general"],
+                    "description": "Role specialization of the sub-agent: 'researcher', 'coder', 'reviewer', or 'general' (default: 'general').",
+                },
             },
             "required": ["subtask"],
         },
@@ -58,9 +81,23 @@ Reply with exactly one word: CHAT or TASK."""
 
 def _is_chat(task, model):
     """Decide up front whether `task` is plain conversation or a real coding task."""
+    task_str = str(task or "").strip()
+    if not task_str:
+        return True
+    task_lower = task_str.lower()
+    task_indicators = [
+        "bug", "issue", "error", "exception", "traceback", "fix", "implement", "create",
+        "add", "edit", "write", "test", "def ", "class ", "import ", "python", "diff",
+        ".py", ".js", ".ts", ".html", ".css", ".md", ".json", "failed", "failing",
+    ]
+    if any(ind in task_lower for ind in task_indicators):
+        return False
+    if len(task_str) > 120 or "\n" in task_str:
+        return False
+
     try:
         response = chat(
-            [{"role": "system", "content": _CLASSIFY_SYSTEM}, {"role": "user", "content": task}],
+            [{"role": "system", "content": _CLASSIFY_SYSTEM}, {"role": "user", "content": task_str}],
             tools=None, model=model,
         )
         return (response.choices[0].message.content or "").strip().upper().startswith("CHAT")
@@ -267,9 +304,9 @@ def _malformed_tool_call_retry(emit):
         result="Model produced malformed or invalid JSON arguments in tool call; automatically retrying with escaping instructions.",
     )
     return None, None, (
-        "Your previous tool call failed because the arguments were not valid JSON or could not be parsed. "
-        "Please retry your tool call, ensuring that all string arguments (e.g. 'content', 'old_str', 'new_str') "
-        "have quotes and newlines properly JSON-escaped, and invoke only one tool call."
+        "Your previous tool call failed because the arguments were not valid JSON or could not be parsed by the API. "
+        "Please retry your tool call as a single, valid tool call with properly formatted JSON arguments. "
+        "Note: In file contents or commands, newlines should be actual line breaks, NOT literal '\\n' strings."
     )
 
 
@@ -350,7 +387,8 @@ def _parse_content_tool_calls(content, known_tool_names):
 
 def run_agent(
     root_dir, task, model=None, max_iterations=25, verbose=True, on_event=None, allow_subagents=True,
-    messages=None, stop_event=None, on_permission=None, session_id=None,
+    messages=None, stop_event=None, on_permission=None, session_id=None, force_task=False,
+    system_prompt=None, custom_tools=None, subagent_id=None, subagent_role=None,
 ):
     """Run the agent on `task` inside `root_dir` until completion, stop, or max_iterations."""
     trajectory = SessionTrajectoryLogger(root_dir, session_id) if session_id else None
@@ -367,7 +405,15 @@ def run_agent(
     def _finish(result):
         if session_id:
             try:
-                sessions.save_session(root_dir, session_id, messages, result)
+                events = trajectory.get_trajectory() if trajectory else None
+                sessions.save_session(
+                    root_dir,
+                    session_id,
+                    messages,
+                    result=result,
+                    events=events,
+                    metadata={"provider": get_provider(), "model": model or get_model()},
+                )
             except OSError:
                 pass
         cleanup_jobs()
@@ -379,39 +425,97 @@ def run_agent(
         cleanup_jobs()
         return _finish({"messages": messages, "finished": False, "summary": "Stopped by user"})
 
-    schemas, impls = build_tools(root_dir)
+    emit("user_prompt", text=task)
+    if custom_tools is not None:
+        schemas, impls = custom_tools
+    else:
+        schemas, impls = build_tools(root_dir, session_id=session_id)
 
     if allow_subagents:
-        def spawn_subagent(subtask):
+        import uuid
+
+        def spawn_subagent(subtask, role="general", **kwargs):
+            role_cfg = get_role_config(role)
+            sub_id = f"sub-{uuid.uuid4().hex[:6]}"
+
+            # Emit start event for hierarchy rendering
+            emit(
+                "subagent_start",
+                id=sub_id,
+                role=role_cfg.role,
+                name=role_cfg.name,
+                icon=role_cfg.icon,
+                color=role_cfg.color,
+                task=subtask,
+            )
+
+            # Partition tools according to role permissions
+            base_schemas, base_impls = build_tools(root_dir, session_id=session_id)
+            sub_schemas, sub_impls = filter_tools_for_role(base_schemas, base_impls, role_cfg.allowed_tools)
+
             def _sub_event(event):
+                enriched = {
+                    **event,
+                    "subagent": subtask[:40],
+                    "subagent_id": sub_id,
+                    "subagent_role": role_cfg.role,
+                    "subagent_name": role_cfg.name,
+                    "subagent_icon": role_cfg.icon,
+                }
                 if on_event:
-                    on_event({**event, "subagent": subtask[:40]})
+                    on_event(enriched)
+                elif verbose:
+                    _print_event(enriched.get("type", ""), enriched)
 
             sub_result = run_agent(
-                root_dir, subtask, model=model, max_iterations=8, verbose=False,
-                on_event=_sub_event if on_event else None, allow_subagents=False,
+                root_dir, subtask, model=model, max_iterations=role_cfg.max_iterations, verbose=False,
+                on_event=_sub_event, allow_subagents=False,
                 stop_event=stop_event, on_permission=on_permission,
+                system_prompt=role_cfg.system_prompt,
+                subagent_id=sub_id, subagent_role=role_cfg.role,
+                custom_tools=(sub_schemas, sub_impls),
             )
-            if sub_result["finished"]:
-                return f"[SUBAGENT COMPLETED] {sub_result['summary']}"
+
+            success = sub_result.get("finished", False)
+            summary = sub_result.get("summary", "")
+
+            # Emit finish event
+            emit(
+                "subagent_finish",
+                id=sub_id,
+                role=role_cfg.role,
+                name=role_cfg.name,
+                icon=role_cfg.icon,
+                color=role_cfg.color,
+                task=subtask,
+                success=success,
+                summary=summary,
+            )
+
+            if success:
+                return f"[{role_cfg.name.upper()} SUBAGENT COMPLETED] {summary}"
             return (
-                f"ERROR: sub-agent did not confirm completion. "
-                f"Last message: {sub_result['summary']}. Verify touched files before proceeding."
+                f"[{role_cfg.name.upper()} SUBAGENT INCOMPLETE] {summary}. "
+                f"Verify touched files before proceeding."
             )
 
         schemas = schemas + [_SPAWN_SUBAGENT_SCHEMA]
         impls = {**impls, "spawn_subagent": spawn_subagent}
 
     if messages is None:
-        memory_note = impls["memory_read"]()
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        memory_note = impls["memory_read"]() if "memory_read" in impls else "(memory is empty)"
+        summary = impls.get("workspace_summary", lambda: "")()
+        sys_content = system_prompt or SYSTEM_PROMPT
+        messages = [{"role": "system", "content": sys_content}]
+        if summary and summary != "Workspace initialized.":
+            messages.append({"role": "system", "content": f"Workspace Context: {summary}"})
         if memory_note != "(memory is empty)":
             messages.append({"role": "system", "content": f"Project memory (persisted notes from previous runs):\n{memory_note}"})
         messages.append({"role": "user", "content": task})
     else:
         messages.append({"role": "user", "content": task})
 
-    if _is_chat(task, model):
+    if not force_task and _is_chat(task, model):
         emit("thinking")
         response, err, retry_hint = _safe_chat(messages, None, model, emit)
         if err:
@@ -429,6 +533,7 @@ def run_agent(
     repeat_count = 0
     did_any_tool_call = False
     nudged_to_finish = False
+    nudged_to_tool = False
     malformed_retries = 0
 
     for _ in range(max_iterations):
@@ -471,6 +576,15 @@ def run_agent(
                 ]
 
         if not tool_calls:
+            if force_task and not did_any_tool_call and not nudged_to_tool:
+                nudged_to_tool = True
+                messages.append({
+                    "role": "user",
+                    "content": "This task requires inspecting and modifying files in the repository. "
+                               "Please call the appropriate tools (e.g. grep, find_files, read_file, edit_file) "
+                               "to locate the issue and apply code changes.",
+                })
+                continue
             if did_any_tool_call and not nudged_to_finish:
                 nudged_to_finish = True
                 messages.append({
@@ -499,6 +613,11 @@ def run_agent(
             emit("tool_call", name=name, args=args if args is not None else {"_raw": raw_arguments[:200]})
 
             func = impls.get(name)
+            if func is None and "." in name:
+                short_name = name.split(".")[-1]
+                if short_name in impls:
+                    name = short_name
+                    func = impls[name]
             diff = None
             if args is None:
                 result = arg_err_msg
@@ -552,13 +671,35 @@ def run_agent(
     return _finish({"messages": messages, "finished": False, "summary": "Max iterations reached"})
 
 
+def _safe_print(text):
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            print(text.encode(encoding, errors="replace").decode(encoding))
+        except Exception:
+            print(text.encode("ascii", errors="replace").decode("ascii"))
+
+
 def _print_event(event_type, data):
     """Default plain-print rendering of agent events."""
-    if event_type == "tool_call":
-        print(f"[tool] {data['name']}({data['args']})")
+    prefix = ""
+    if data.get("subagent_name"):
+        prefix = f"[{data.get('subagent_icon', '🤖')} {data.get('subagent_name')}] "
+    elif data.get("subagent"):
+        prefix = f"[{data['subagent']}] "
+
+    if event_type == "subagent_start":
+        _safe_print(f"--> [{data.get('icon', '🤖')} {data.get('name', 'Sub-Agent')}] Starting: {data.get('task')}")
+    elif event_type == "subagent_finish":
+        status = "Completed" if data.get("success") else "Incomplete"
+        _safe_print(f"<-- [{data.get('icon', '🤖')} {data.get('name', 'Sub-Agent')}] {status}: {data.get('summary', '')}")
+    elif event_type == "tool_call":
+        _safe_print(f"{prefix}[tool] {data['name']}({data['args']})")
     elif event_type == "tool_result":
-        print(f"[result] {str(data['result'])[:500]}")
+        _safe_print(f"{prefix}[result] {str(data['result'])[:500]}")
     elif event_type == "answer":
-        print(f"[agent] {data['text']}")
+        _safe_print(f"{prefix}[agent] {data.get('text', '')}")
     elif event_type == "error":
-        print(data["message"])
+        _safe_print(f"{prefix}{str(data.get('message', ''))}")

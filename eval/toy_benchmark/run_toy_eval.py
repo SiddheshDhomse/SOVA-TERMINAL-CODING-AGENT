@@ -11,6 +11,7 @@ from eval.toy_benchmark.tasks import TASKS
 
 
 def run_one(task_def):
+    load_dotenv()
     root = tempfile.mkdtemp(prefix=f"toy_{task_def['id']}_")
     try:
         for rel_path, content in task_def["files"].items():
@@ -19,7 +20,7 @@ def run_one(task_def):
             with open(full, "w", encoding="utf-8") as f:
                 f.write(content)
 
-        run_agent(root, task_def["task"], verbose=False)
+        run_agent(root, task_def["task"], verbose=True, session_id=f"toy_{task_def['id']}")
 
         result = subprocess.run(
             task_def["check_cmd"], shell=True, cwd=root, capture_output=True, text=True

@@ -187,27 +187,27 @@ def get_client() -> OpenAI:
         return _client
 
     if provider == "groq":
-        api_key = os.environ.get("GROQ_API_KEY") or _creds.get_credential(os.getcwd(), "GROQ_API_KEY")
+        api_key = _creds.get_active_credential("GROQ_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "GROQ_API_KEY is not set. Copy .env.example to .env and add your free Groq API key."
+                "GROQ_API_KEY is not set or invalid. Please add your Groq API key in Settings or .env file."
             )
         base_url = "https://api.groq.com/openai/v1"
     elif provider == "ollama":
         api_key = "ollama"  # unused by Ollama but required by the OpenAI client
-        host = (os.environ.get("SOVA_OLLAMA_HOST") or _creds.get_credential(os.getcwd(), "SOVA_OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
+        host = (_creds.get_active_credential("SOVA_OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
         base_url = f"{host}/v1"
     elif provider == "nvidia":
-        api_key = os.environ.get("NVIDIA_API_KEY") or _creds.get_credential(os.getcwd(), "NVIDIA_API_KEY")
+        api_key = _creds.get_active_credential("NVIDIA_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "NVIDIA_API_KEY is not set. Add your Nvidia API key from https://build.nvidia.com."
+                "NVIDIA_API_KEY is not set or invalid. Please add your Nvidia API key in Settings or .env file."
             )
         base_url = "https://integrate.api.nvidia.com/v1"
     elif provider == "openai":
-        api_key = os.environ.get("OPENAI_API_KEY") or _creds.get_credential(os.getcwd(), "OPENAI_API_KEY")
+        api_key = _creds.get_active_credential("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set. Add your OpenAI API key in .env.")
+            raise RuntimeError("OPENAI_API_KEY is not set or invalid. Please add your OpenAI API key in Settings or .env file.")
         base_url = None
     else:
         raise RuntimeError(f"Unknown SOVA_PROVIDER '{provider}'. Use 'groq', 'ollama', 'nvidia', or 'openai'.")

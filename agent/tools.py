@@ -277,12 +277,85 @@ _SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_outline",
+            "description": (
+                "Get a concise architectural outline of classes, functions, and methods with line numbers "
+                "and signatures for a file. Use this instead of reading full files to save token budget."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative file path to inspect (e.g. 'requests/adapters.py')."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_definition",
+            "description": (
+                "Find where a class, function, or method is defined across the workspace using the AST symbol index. "
+                "Returns the file path, line bounds, signature, and docstring."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Name of the class, function, or method to find."},
+                    "path": {"type": "string", "description": "Optional file path or directory filter."},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_references",
+            "description": (
+                "Find usages and call sites of a symbol across project files, distinguishing definitions from references."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Name of the symbol to find references for."},
+                    "path": {"type": "string", "description": "Optional file path or directory filter."},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_summary",
+            "description": (
+                "Get high-level summary of the workspace: detected programming languages, test runners, "
+                "entry points, and indexed file statistics."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "undo",
+            "description": "Undo the most recent file modification by rolling back the file to its previous checkpoint.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
-def build_tools(root_dir):
+def build_tools(root_dir, session_id=None):
     """Return (schemas, impls) with all tools bound to root_dir, restricting file access to it."""
     root_dir = os.path.abspath(root_dir)
+    from .checkpoints import CheckpointManager
+    checkpoint_mgr = CheckpointManager(root_dir, session_id=session_id)
 
     def _resolve(path):
         full = os.path.abspath(os.path.join(root_dir, path))
@@ -290,7 +363,11 @@ def build_tools(root_dir):
             raise ValueError(f"Path '{path}' escapes the working directory")
         return full
 
-    def read_file(path, start_line=1, end_line=None):
+    def read_file(path, start_line=1, end_line=None, line_start=None, line_end=None):
+        if line_start is not None and start_line == 1:
+            start_line = line_start
+        if line_end is not None and end_line is None:
+            end_line = line_end
         full = _resolve(path)
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -318,7 +395,16 @@ def build_tools(root_dir):
         except SyntaxError as exc:
             return f"SyntaxError: {exc.msg} (line {exc.lineno})"
 
+    def _normalize_content(content):
+        if not isinstance(content, str):
+            return content
+        # Detect and repair double-escaped newlines emitted by some LLMs
+        if "\\n" in content and content.count("\n") <= 1:
+            content = content.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+        return content
+
     def write_file(path, content):
+        content = _normalize_content(content)
         full = _resolve(path)
         old_content = ""
         if os.path.exists(full):
@@ -328,13 +414,18 @@ def build_tools(root_dir):
             except Exception:
                 old_content = ""
         os.makedirs(os.path.dirname(full) or root_dir, exist_ok=True)
+        checkpoint_mgr.record_before_change(path, "write_file")
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
         error = _check_python_syntax(path, content)
         suffix = f" ERROR: {error}" if error else ""
         return f"Wrote {len(content)} chars to {path}.{suffix}", unified_diff(path, old_content, content)
 
-    def edit_file(path, old_str, new_str, start_line=None, end_line=None):
+    def edit_file(path, old_str, new_str, start_line=None, end_line=None, line_start=None, line_end=None):
+        if line_start is not None and start_line is None:
+            start_line = line_start
+        if line_end is not None and end_line is None:
+            end_line = line_end
         full = _resolve(path)
         if not old_str:
             return (
@@ -353,7 +444,7 @@ def build_tools(root_dir):
         # Normalize CRLF/LF to prevent cross-platform line ending mismatch
         content_norm = content.replace("\r\n", "\n")
         old_norm = old_str.replace("\r\n", "\n")
-        new_norm = new_str.replace("\r\n", "\n")
+        new_norm = _normalize_content(new_str).replace("\r\n", "\n")
 
         if start_line is not None or end_line is not None:
             lines = content_norm.splitlines(keepends=True)
@@ -377,6 +468,7 @@ def build_tools(root_dir):
                 return f"ERROR: old_str matches {count} times in {path}. Provide start_line and end_line to narrow down target location."
             new_content = content_norm.replace(old_norm, new_norm, 1)
 
+        checkpoint_mgr.record_before_change(path, "edit_file")
         with open(full, "w", encoding="utf-8") as f:
             f.write(new_content)
         error = _check_python_syntax(path, new_content)
@@ -529,6 +621,21 @@ def build_tools(root_dir):
     def finish(summary):
         return summary
 
+    from .symbols import WorkspaceSymbolIndex
+    symbol_index = WorkspaceSymbolIndex(root_dir)
+
+    def get_outline(path):
+        return symbol_index.get_outline(path)
+
+    def find_definition(symbol, path=None):
+        return symbol_index.find_definition(symbol, path_filter=path)
+
+    def find_references(symbol, path=None):
+        return symbol_index.find_references(symbol, path_filter=path)
+
+    def workspace_summary():
+        return symbol_index.get_workspace_summary()
+
     impls = {
         "read_file": read_file,
         "write_file": write_file,
@@ -542,6 +649,12 @@ def build_tools(root_dir):
         "shell_output": shell_output,
         "todo_write": todo_write,
         "todo_read": todo_read,
+        "get_outline": get_outline,
+        "find_definition": find_definition,
+        "find_references": find_references,
+        "workspace_summary": workspace_summary,
         "finish": finish,
+        "undo": checkpoint_mgr.undo_last,
+        "_checkpoints": checkpoint_mgr,
     }
     return _SCHEMAS, impls
