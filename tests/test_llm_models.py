@@ -13,8 +13,12 @@ class TestModelNormalization(unittest.TestCase):
 
     def test_deprecated_groq_model_maps_to_supported_default(self):
         self.assertEqual(
-            normalize_model("llama-3.3-70b-versatile", provider="groq"),
+            normalize_model("llama3-70b-8192", provider="groq"),
             "openai/gpt-oss-120b",
+        )
+        self.assertEqual(
+            normalize_model("llama-3.3-70b-versatile", provider="groq"),
+            "llama-3.3-70b-versatile",
         )
 
     def test_unknown_model_is_left_unchanged(self):

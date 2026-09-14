@@ -178,6 +178,61 @@ class TestPrecisionEditAndLogger(unittest.TestCase):
         self.assertIn("x = 1", read_back)
         self.assertIn("return x", read_back)
 
+    def test_edit_file_preserves_crlf_on_disk(self):
+        full = os.path.join(self.root, "crlf_preserved.py")
+        with open(full, "wb") as f:
+            f.write(b"def foo():\r\n    return 1\r\n")
+
+        res, diff = self.impls["edit_file"]("crlf_preserved.py", "return 1", "return 2")
+        self.assertIn("Edited", res)
+        with open(full, "rb") as f:
+            raw_bytes = f.read()
+        self.assertIn(b"\r\n", raw_bytes)
+        self.assertEqual(raw_bytes, b"def foo():\r\n    return 2\r\n")
+
+    def test_read_file_truncates_at_newline_boundary(self):
+        # 100 lines of 60 chars is < 250 lines, but ~6,500 chars (> 5,000 char limit)
+        line_body = "x" * 60
+        long_content = (line_body + "\n") * 100
+        self.impls["write_file"]("long_file.py", long_content)
+        read_back = self.impls["read_file"]("long_file.py")
+        self.assertIn("Truncated to stay within token limits", read_back)
+        lines = read_back.splitlines()
+        trunc_idx = [i for i, l in enumerate(lines) if "Truncated to stay within token limits" in l][0]
+        prev_line = lines[trunc_idx - 1]
+        self.assertTrue(prev_line.endswith(line_body))
+
+    def test_parse_content_tool_calls_nested_json(self):
+        from agent.loop import _parse_content_tool_calls
+        content = (
+            'Here is the plan:\n'
+            '```json\n'
+            '{\n'
+            '  "name": "todo_write",\n'
+            '  "parameters": {\n'
+            '    "todos": [\n'
+            '      {"content": "Inspect code", "status": "completed"},\n'
+            '      {"content": "Fix bug", "status": "in_progress"}\n'
+            '    ]\n'
+            '  }\n'
+            '}\n'
+            '```'
+        )
+        calls = _parse_content_tool_calls(content, {"todo_write", "read_file"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].function.name, "todo_write")
+        import json
+        args = json.loads(calls[0].function.arguments)
+        self.assertEqual(len(args["todos"]), 2)
+        self.assertEqual(args["todos"][0]["status"], "completed")
+
+    def test_read_file_empty_file(self):
+        empty_path = os.path.join(self.root, "empty.txt")
+        with open(empty_path, "w", encoding="utf-8") as f:
+            pass
+        out = self.impls["read_file"]("empty.txt")
+        self.assertEqual(out, "(empty file)")
+
 
 if __name__ == "__main__":
     unittest.main()
