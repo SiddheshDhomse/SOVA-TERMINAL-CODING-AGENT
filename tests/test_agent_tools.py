@@ -234,5 +234,66 @@ class TestPrecisionEditAndLogger(unittest.TestCase):
         self.assertEqual(out, "(empty file)")
 
 
+class TestFuzzyFileResolution(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._schemas, self.impls = build_tools(self.root)
+        self.impls["write_file"]("agent/tools.py", "def build_tools():\n    return 'tools'\n")
+        self.impls["write_file"]("agent/sub/deep.py", "def deep_fn():\n    pass\n")
+        self.impls["write_file"]("pkg_a/shared.py", "# pkg_a\n")
+        self.impls["write_file"]("pkg_b/shared.py", "# pkg_b\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_read_file_auto_resolves_basename(self):
+        res = self.impls["read_file"]("tools.py")
+        self.assertIn("[Auto-resolved 'tools.py' -> 'agent/tools.py']", res)
+        self.assertIn("def build_tools():", res)
+
+    def test_read_file_exact_path_has_no_auto_resolve_prefix(self):
+        res = self.impls["read_file"]("agent/tools.py")
+        self.assertNotIn("Auto-resolved", res)
+        self.assertIn("def build_tools():", res)
+
+    def test_read_file_nonexistent_returns_clean_error(self):
+        res = self.impls["read_file"]("nonexistent.py")
+        self.assertIn("ERROR: file 'nonexistent.py' does not exist in workspace.", res)
+
+    def test_read_file_ambiguous_candidates(self):
+        res = self.impls["read_file"]("shared.py")
+        self.assertIn("ERROR: file 'shared.py' not found. Did you mean one of:", res)
+        self.assertIn("pkg_a/shared.py", res)
+        self.assertIn("pkg_b/shared.py", res)
+
+    def test_read_file_with_line_number_in_path(self):
+        res = self.impls["read_file"]("agent/tools.py:1")
+        self.assertIn("1: def build_tools():", res)
+
+    def test_read_file_directory_fails_cleanly(self):
+        res = self.impls["read_file"]("agent")
+        self.assertIn("ERROR: 'agent' is a directory, not a file.", res)
+
+    def test_edit_file_auto_resolves_basename(self):
+        res, diff = self.impls["edit_file"]("tools.py", "return 'tools'", "return 'modern_tools'")
+        self.assertIn("Edited agent/tools.py (auto-resolved from 'tools.py')", res)
+        self.assertIn("+    return 'modern_tools'", diff)
+        updated = self.impls["read_file"]("agent/tools.py")
+        self.assertIn("return 'modern_tools'", updated)
+
+    def test_get_outline_auto_resolves_basename(self):
+        res = self.impls["get_outline"]("tools.py")
+        self.assertIn("agent/tools.py", res)
+        self.assertIn("build_tools", res)
+
+    def test_list_dir_missing_returns_clean_error(self):
+        res = self.impls["list_dir"]("does_not_exist")
+        self.assertIn("ERROR: directory 'does_not_exist' does not exist.", res)
+
+    def test_grep_missing_path_returns_clean_error(self):
+        res = self.impls["grep"]("build_tools", path="does_not_exist")
+        self.assertIn("ERROR: path 'does_not_exist' does not exist.", res)
+
+
 if __name__ == "__main__":
     unittest.main()

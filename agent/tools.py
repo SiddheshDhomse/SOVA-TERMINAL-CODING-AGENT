@@ -53,6 +53,42 @@ def _prune_dirs(dirnames):
     dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS and not d.endswith(".egg-info")]
 
 
+def _find_fuzzy_candidates(root_dir: str, path: str) -> List[str]:
+    """Find relative paths of files in root_dir matching path by suffix or basename."""
+    if not path or not isinstance(path, str):
+        return []
+    norm_target = path.replace("\\", "/").strip().lstrip("./")
+    target_base = os.path.basename(norm_target)
+    if not target_base:
+        return []
+
+    suffix_matches: List[str] = []
+    base_matches: List[str] = []
+    case_insensitive_matches: List[str] = []
+
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        _prune_dirs(dirnames)
+        for fname in filenames:
+            full_f = os.path.join(dirpath, fname)
+            rel = os.path.relpath(full_f, root_dir).replace(os.sep, "/")
+
+            if rel == norm_target or rel.endswith("/" + norm_target):
+                suffix_matches.append(rel)
+            elif fname == target_base:
+                base_matches.append(rel)
+            elif fname.lower() == target_base.lower() or rel.lower().endswith("/" + norm_target.lower()):
+                case_insensitive_matches.append(rel)
+
+    if suffix_matches:
+        return sorted(list(dict.fromkeys(suffix_matches)))
+    if base_matches:
+        return sorted(list(dict.fromkeys(base_matches)))
+    if case_insensitive_matches:
+        return sorted(list(dict.fromkeys(case_insensitive_matches)))
+    return []
+
+
+
 def unified_diff(path, old_text, new_text):
     """Return a unified diff string (empty if identical), used for change previews."""
     diff = difflib.unified_diff(
@@ -401,27 +437,94 @@ def build_tools(root_dir, session_id=None):
             raise ValueError(f"Path '{path}' escapes the working directory")
         return full
 
+    def _resolve_existing(path: str) -> Tuple[Optional[str], str, Optional[str], bool]:
+        """Resolve path to an existing file within root_dir, with fuzzy subdirectory fallback.
+
+        Returns:
+            (full_path, relative_path, error_message, is_auto_resolved)
+        """
+        if not path or not isinstance(path, str) or not path.strip():
+            return None, path or "", "ERROR: path cannot be empty.", False
+
+        clean_path = path.strip()
+        try:
+            full = _resolve(clean_path)
+        except ValueError as exc:
+            return None, clean_path, f"ERROR: {exc}", False
+
+        # 1. Exact path match
+        if os.path.exists(full):
+            if os.path.isdir(full):
+                return None, clean_path, f"ERROR: '{clean_path}' is a directory, not a file.", False
+            rel = os.path.relpath(full, root_dir).replace(os.sep, "/")
+            return full, rel, None, False
+
+        # 2. Fuzzy workspace candidate search
+        candidates = _find_fuzzy_candidates(root_dir, clean_path)
+        if len(candidates) == 1:
+            resolved_rel = candidates[0]
+            resolved_full = os.path.join(root_dir, resolved_rel)
+            return resolved_full, resolved_rel, None, True
+        elif len(candidates) > 1:
+            return None, clean_path, f"ERROR: file '{clean_path}' not found. Did you mean one of: {candidates}?", False
+        else:
+            return None, clean_path, f"ERROR: file '{clean_path}' does not exist in workspace.", False
+
     def read_file(path, start_line=1, end_line=None, line_start=None, line_end=None):
         if line_start is not None and start_line == 1:
             start_line = line_start
         if line_end is not None and end_line is None:
             end_line = line_end
-        full = _resolve(path)
-        with open(full, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+
+        # Handle line suffixes like path.py:10-50 or path.py#L10
+        if isinstance(path, str):
+            m = re.match(r"^(.*?)(?::(\d+)(?:-(\d+))?|#L?(\d+)(?:-L?(\d+))?)$", path.strip())
+            if m:
+                path = m.group(1)
+                s_val = m.group(2) or m.group(4)
+                e_val = m.group(3) or m.group(5)
+                if (start_line == 1 or start_line is None) and s_val:
+                    start_line = int(s_val)
+                if end_line is None and e_val:
+                    end_line = int(e_val)
+
+        try:
+            start_line = int(start_line) if start_line is not None else 1
+        except (ValueError, TypeError):
+            start_line = 1
+        if start_line < 1:
+            start_line = 1
+
+        try:
+            end_line = int(end_line) if end_line is not None else None
+        except (ValueError, TypeError):
+            end_line = None
+
+        full, rel, err, is_auto_resolved = _resolve_existing(path)
+        if err:
+            return err
+
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError as exc:
+            return f"ERROR: cannot read '{rel}': {exc}"
+
+        prefix = f"[Auto-resolved '{path}' -> '{rel}']\n" if is_auto_resolved else ""
+
         if not lines:
-            return "(empty file)"
+            return prefix + "(empty file)"
         end_line = end_line or len(lines)
         chunk = lines[start_line - 1:end_line]
 
         # Prevent large file reads from overflowing TPM budgets
         if len(chunk) > 250:
             truncated = chunk[:250]
-            output = "".join(f"{i}: {line}" for i, line in enumerate(truncated, start=start_line))
+            output = prefix + "".join(f"{i}: {line}" for i, line in enumerate(truncated, start=start_line))
             output += f"\n... [Truncated {len(chunk) - 250} lines to preserve token budget. Use start_line={start_line + 250} to read further]\n"
             return output
 
-        output = "".join(f"{i}: {line}" for i, line in enumerate(chunk, start=start_line))
+        output = prefix + "".join(f"{i}: {line}" for i, line in enumerate(chunk, start=start_line))
         if len(output) > 5000:
             cut_idx = output.rfind("\n", 0, 5000)
             if cut_idx == -1:
@@ -441,7 +544,10 @@ def build_tools(root_dir, session_id=None):
 
     def write_file(path, content):
         content = _normalize_content(content)
-        full = _resolve(path)
+        try:
+            full = _resolve(path)
+        except ValueError as exc:
+            return f"ERROR: {exc}"
         old_content = ""
         if os.path.exists(full):
             try:
@@ -463,6 +569,18 @@ def build_tools(root_dir, session_id=None):
         if line_end is not None and end_line is None:
             end_line = line_end
 
+        # Handle line suffixes like path.py:10-50 or path.py#L10
+        if isinstance(path, str):
+            m = re.match(r"^(.*?)(?::(\d+)(?:-(\d+))?|#L?(\d+)(?:-L?(\d+))?)$", path.strip())
+            if m:
+                path = m.group(1)
+                s_val = m.group(2) or m.group(4)
+                e_val = m.group(3) or m.group(5)
+                if start_line is None and s_val:
+                    start_line = int(s_val)
+                if end_line is None and e_val:
+                    end_line = int(e_val)
+
         def _clean_line_no(val):
             if val is None:
                 return None
@@ -481,7 +599,6 @@ def build_tools(root_dir, session_id=None):
 
         start_line = _clean_line_no(start_line)
         end_line = _clean_line_no(end_line)
-        full = _resolve(path)
         if not old_str:
             return (
                 "ERROR: old_str cannot be empty. To insert or prepend code into an existing file, "
@@ -490,11 +607,16 @@ def build_tools(root_dir, session_id=None):
                 "old_str='import tkinter as tk', new_str='# build by SOVA\\nimport tkinter as tk'). "
                 "DO NOT use write_file to insert a line or comment, as write_file will destroy the rest of the file!"
             )
-        if not os.path.exists(full):
-            return f"ERROR: file '{path}' does not exist."
 
-        with open(full, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        full, rel, err, is_auto_resolved = _resolve_existing(path)
+        if err:
+            return err
+
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError as exc:
+            return f"ERROR: cannot read '{rel}': {exc}"
 
         has_crlf = "\r\n" in content
 
@@ -510,7 +632,7 @@ def build_tools(root_dir, session_id=None):
             target_slice = "".join(lines[s_idx:e_idx])
             count = target_slice.count(old_norm)
             if count == 0:
-                return f"ERROR: old_str not found in {path} between lines {s_idx + 1} and {e_idx}."
+                return f"ERROR: old_str not found in {rel} between lines {s_idx + 1} and {e_idx}."
             if count > 1:
                 return f"ERROR: old_str matches {count} times between lines {s_idx + 1} and {e_idx}. Narrow the range."
             new_slice = target_slice.replace(old_norm, new_norm, 1)
@@ -519,24 +641,35 @@ def build_tools(root_dir, session_id=None):
             count = content_norm.count(old_norm)
             if count == 0:
                 if old_norm.strip() in content_norm:
-                    return f"ERROR: old_str not found in {path}. Check indentation or whitespace differences against read_file."
-                return f"ERROR: old_str not found in {path}."
+                    return f"ERROR: old_str not found in {rel}. Check indentation or whitespace differences against read_file."
+                return f"ERROR: old_str not found in {rel}."
             if count > 1:
-                return f"ERROR: old_str matches {count} times in {path}. Provide start_line and end_line to narrow down target location."
+                return f"ERROR: old_str matches {count} times in {rel}. Provide start_line and end_line to narrow down target location."
             new_content = content_norm.replace(old_norm, new_norm, 1)
 
         final_content = new_content.replace("\r\n", "\n").replace("\n", "\r\n") if has_crlf else new_content
 
-        checkpoint_mgr.record_before_change(path, "edit_file")
+        checkpoint_mgr.record_before_change(rel, "edit_file")
         with open(full, "w", encoding="utf-8") as f:
             f.write(final_content)
-        diag = run_fast_diagnostics(path, final_content)
+        diag = run_fast_diagnostics(rel, final_content)
         suffix = format_diagnostic_feedback(diag) if diag else ""
-        return f"Edited {path}.{suffix}", unified_diff(path, content, final_content)
+        notice = f" (auto-resolved from '{path}')" if is_auto_resolved else ""
+        return f"Edited {rel}{notice}.{suffix}", unified_diff(rel, content, final_content)
 
     def list_dir(path="."):
-        full = _resolve(path)
-        entries = sorted(os.listdir(full))
+        try:
+            full = _resolve(path)
+        except ValueError as exc:
+            return f"ERROR: {exc}"
+        if not os.path.exists(full):
+            return f"ERROR: directory '{path}' does not exist."
+        if not os.path.isdir(full):
+            return f"ERROR: '{path}' is a file, not a directory."
+        try:
+            entries = sorted(os.listdir(full))
+        except OSError as exc:
+            return f"ERROR: cannot list '{path}': {exc}"
         return "\n".join(entries[:60]) if entries else "(empty)"
 
     def _find_files_fallback(pattern, full):
@@ -553,7 +686,12 @@ def build_tools(root_dir, session_id=None):
         return matches
 
     def find_files(pattern, path="."):
-        full = _resolve(path)
+        try:
+            full = _resolve(path)
+        except ValueError as exc:
+            return f"ERROR: {exc}"
+        if not os.path.exists(full) or not os.path.isdir(full):
+            return f"ERROR: directory '{path}' does not exist."
         if _RG_PATH:
             try:
                 result = subprocess.run(
@@ -602,7 +740,12 @@ def build_tools(root_dir, session_id=None):
         return matches
 
     def grep(pattern, path=".", regex=False):
-        full = _resolve(path)
+        try:
+            full = _resolve(path)
+        except ValueError as exc:
+            return f"ERROR: {exc}"
+        if not os.path.exists(full):
+            return f"ERROR: path '{path}' does not exist."
         if _RG_PATH:
             cmd = [_RG_PATH, "--line-number", "--hidden", "--glob", "!.git", "--max-count", "50"]
             if not regex:
@@ -684,12 +827,27 @@ def build_tools(root_dir, session_id=None):
     symbol_index = WorkspaceSymbolIndex(root_dir)
 
     def get_outline(path):
-        return symbol_index.get_outline(path)
+        if isinstance(path, str):
+            m = re.match(r"^(.*?)(?::\d+(?:-\d+)?|#L?\d+(?:-L?\d+)?)$", path.strip())
+            if m:
+                path = m.group(1)
+        full, rel, err, _ = _resolve_existing(path)
+        if err:
+            return err
+        return symbol_index.get_outline(rel)
 
     def find_definition(symbol, path=None):
+        if path:
+            _, rel, err, _ = _resolve_existing(path)
+            if not err:
+                path = rel
         return symbol_index.find_definition(symbol, path_filter=path)
 
     def find_references(symbol, path=None):
+        if path:
+            _, rel, err, _ = _resolve_existing(path)
+            if not err:
+                path = rel
         return symbol_index.find_references(symbol, path_filter=path)
 
     def workspace_summary():
@@ -699,6 +857,10 @@ def build_tools(root_dir, session_id=None):
     search_index = BM25Index(root_dir)
 
     def search_code(query, path=None, top_k=5):
+        if path:
+            _, rel, err, _ = _resolve_existing(path)
+            if not err:
+                path = rel
         return search_index.format_search_results(query, path_filter=path, top_k=top_k)
 
     from .testing import run_tests as _exec_tests
