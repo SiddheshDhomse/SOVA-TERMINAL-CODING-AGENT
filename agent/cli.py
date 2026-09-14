@@ -337,22 +337,32 @@ def _render_event(event: dict) -> None:
         rendered = Markdown(text) if text.strip() else Text("")
         if is_sub:
             console.print(f"{sub_indent}[OK] {text}", style="tool.result")
-        elif event.get("verified"):
-            console.print(Panel(rendered, title="[bold bright_green]Sova[/bold bright_green]", border_style="answer"))
+        elif event.get("verified") or event.get("chat"):
+            title = "[bold bright_cyan]Sova[/bold bright_cyan]" if event.get("chat") else "[bold bright_green]Sova[/bold bright_green]"
+            console.print(Panel(rendered, title=title, border_style="answer"))
         else:
             console.print(Panel(
                 rendered,
                 title="[bold red]Sova (stopped without calling finish)[/bold red]",
                 border_style="error",
             ))
+    elif etype == "diagnostic_warning":
+        _stop_spinner()
+        console.print(Panel(
+            f"[bold yellow]{event.get('message')}[/bold yellow]",
+            title="[bold yellow]⚠️ Syntax / Diagnostic Warning[/bold yellow]",
+            border_style="yellow",
+        ))
     elif etype == "error":
         console.print(f"{prefix}[bold red]{event['message']}[/bold red]")
 
 
-def _print_banner(root_dir: str, session_id: str) -> None:
+def _print_banner(root_dir: str, session_id: str, sandbox_ref: list = None) -> None:
     provider = llm.get_provider()
     model = llm.get_model()
     budget = llm.get_token_budget(provider, model)
+    sb_active = sandbox_ref and sandbox_ref[0] and getattr(sandbox_ref[0], "created", False)
+    sb_status = f"[bold bright_green]ACTIVE ({sandbox_ref[0].branch_name})[/bold bright_green]" if sb_active else "[muted]off (direct)[/muted]"
     body = (
         f"[brand]{_LOGO}[/brand]\n"
         f"[muted]Autonomous Coding Harness[/muted]\n\n"
@@ -360,13 +370,17 @@ def _print_banner(root_dir: str, session_id: str) -> None:
         f"[muted]provider[/muted]     [bold]{provider}[/bold]\n"
         f"[muted]model[/muted]        [bold]{model}[/bold]\n"
         f"[muted]token budget[/muted] {budget} tokens/turn\n"
+        f"[muted]sandbox[/muted]      {sb_status}\n"
         f"[muted]session[/muted]      {session_id}"
     )
     console.print(Panel(body, border_style="brand", padding=(1, 2)))
     commands = Panel(
         "[muted]Commands:\n"
-        "  /provider     - Select LLM provider (Groq, Ollama, Nvidia, OpenAI)\n"
+        "  /provider     - Select LLM provider (Groq, Ollama, Nvidia, OpenAI, Gemini, OpenRouter)\n"
         "  /model        - Select or override model (with dynamic recommendations)\n"
+        "  /search       - Search workspace code using Okapi BM25 (/search <query>)\n"
+        "  /test         - Run test suite or target test script (/test [target])\n"
+        "  /sandbox      - Isolated Git worktree sandbox (/sandbox on|off|diff|apply|discard)\n"
         "  /resume       - List and resume past conversations\n"
         "  /new          - Start a new conversation context\n"
         "  /undo         - Rollback the last file modification made by SOVA\n"
@@ -381,7 +395,7 @@ def _print_banner(root_dir: str, session_id: str) -> None:
     console.print(commands)
 
 
-def _handle_command(task: str, model_override: list, conversation: list, root_dir: str, session_ref: list) -> bool:
+def _handle_command(task: str, model_override: list, conversation: list, root_dir: str, session_ref: list, sandbox_ref: list = None) -> bool:
     parts = task.split(maxsplit=1)
     cmd = parts[0].lower()
 
@@ -532,6 +546,128 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
             console.print(Panel("\n\n".join(recap_lines), title=f"[bold]Context Recap ({arg})[/bold]", border_style="muted"))
         return True
 
+    if cmd == "/sandbox":
+        subcmd = parts[1].strip().lower() if len(parts) > 1 else "status"
+        active_sb = sandbox_ref[0] if (sandbox_ref and sandbox_ref[0] and getattr(sandbox_ref[0], "created", False)) else None
+
+        if subcmd in ("on", "enable", "start"):
+            if active_sb is not None:
+                console.print(f"Sandbox is already active on branch [bold]{active_sb.branch_name}[/bold].", style="muted")
+            else:
+                from .sandbox import GitWorktreeSandbox, is_git_repo
+                if not is_git_repo(root_dir):
+                    console.print("[bold red]Cannot enable sandbox: current workspace is not a Git repository.[/bold red]")
+                    return True
+                sb = GitWorktreeSandbox(root_dir, task_id=session_ref[0])
+                try:
+                    sb.create()
+                    if sandbox_ref is not None:
+                        sandbox_ref[0] = sb
+                    console.print(
+                        f"[bold bright_green]✔ Git worktree sandbox initialized on branch '{sb.branch_name}'.[/bold bright_green]\n"
+                        f"[dim]Worktree: {sb.worktree_dir}[/dim]"
+                    )
+                except Exception as exc:
+                    console.print(f"[bold red]Failed to create sandbox: {exc}[/bold red]")
+            return True
+
+        elif subcmd in ("off", "disable"):
+            if active_sb is None:
+                console.print("Sandbox is not currently active.", style="muted")
+            else:
+                if active_sb.has_changes():
+                    console.print(
+                        "[bold yellow]Sandbox has uncommitted/unmerged changes. "
+                        "Use '/sandbox diff', '/sandbox apply', or '/sandbox discard' before turning off.[/bold yellow]"
+                    )
+                else:
+                    active_sb.discard()
+                    if sandbox_ref is not None:
+                        sandbox_ref[0] = None
+                    console.print("[bright_cyan]Sandbox deactivated. Switched to direct workspace execution.[/bright_cyan]")
+            return True
+
+        elif subcmd == "diff":
+            if active_sb is None:
+                console.print("Sandbox is not active. No sandbox diff available.", style="muted")
+            else:
+                d = active_sb.get_diff()
+                if not d:
+                    console.print("No changes made in the active sandbox yet.", style="muted")
+                else:
+                    _print_diff(d)
+            return True
+
+        elif subcmd == "apply":
+            if active_sb is None:
+                console.print("Sandbox is not active.", style="muted")
+            else:
+                if not active_sb.has_changes():
+                    console.print("Sandbox has no changes to apply.", style="muted")
+                else:
+                    commit_msg = _prompt_input("[bold bright_cyan]> Enter commit message for squash merge (Enter for default): [/bold bright_cyan]")
+                    ok, msg = active_sb.apply_to_main(commit_msg or None)
+                    if ok:
+                        console.print(f"[bold bright_green]✔ {msg}[/bold bright_green]")
+                        if sandbox_ref is not None:
+                            sandbox_ref[0] = None
+                    else:
+                        console.print(f"[bold red]Failed to apply sandbox changes: {msg}[/bold red]")
+            return True
+
+        elif subcmd == "discard":
+            if active_sb is None:
+                console.print("Sandbox is not active.", style="muted")
+            else:
+                confirm = _prompt_input("[bold red]> Are you sure you want to discard ALL sandbox changes? [y/N]: [/bold red]").lower()
+                if confirm == "y":
+                    ok, msg = active_sb.discard()
+                    if sandbox_ref is not None:
+                        sandbox_ref[0] = None
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    console.print("Discard cancelled.", style="muted")
+            return True
+
+        else:
+            if active_sb is None:
+                console.print("Sandbox status: [bold]INACTIVE[/bold] (running directly in workspace). Use '/sandbox on' to activate.", style="muted")
+            else:
+                has_chg = active_sb.has_changes()
+                chg_label = "[bold yellow]Modified (has unmerged changes)[/bold yellow]" if has_chg else "[green]Clean (no changes)[/green]"
+                body = (
+                    f"Status:   [bold bright_green]ACTIVE[/bold bright_green]\n"
+                    f"Branch:   [bold]{active_sb.branch_name}[/bold]\n"
+                    f"State:    {chg_label}\n"
+                    f"Worktree: [dim]{active_sb.worktree_dir}[/dim]\n\n"
+                    f"Subcommands:\n"
+                    f"  /sandbox diff     - View unified diff of sandbox changes\n"
+                    f"  /sandbox apply    - Squash-merge sandbox changes to main\n"
+                    f"  /sandbox discard  - Discard sandbox changes & remove worktree\n"
+                    f"  /sandbox off      - Turn off sandbox mode"
+                )
+                console.print(Panel(body, title="[bold bright_cyan]🛡️ Sandbox Status[/bold bright_cyan]", border_style="bright_cyan"))
+            return True
+
+    if cmd == "/search":
+        if len(parts) < 2 or not parts[1].strip():
+            console.print("[yellow]Usage: /search <conceptual query>[/yellow]", style="muted")
+            return True
+        query = parts[1].strip()
+        from .search import BM25Index
+        idx = BM25Index(root_dir)
+        results = idx.format_search_results(query, top_k=5)
+        console.print(Panel(results, title=f"[bold bright_cyan]Code Search: '{query}'[/bold bright_cyan]", border_style="bright_cyan"))
+        return True
+
+    if cmd == "/test":
+        target = parts[1].strip() if len(parts) > 1 else None
+        from .testing import run_tests
+        console.print(f"[bright_cyan]Running tests{f' on {target}' if target else ''}...[/bright_cyan]")
+        output = run_tests(root_dir, target=target)
+        console.print(Panel(output, title="[bold bright_green]Test Execution Results[/bold bright_green]", border_style="bright_green" if "PASSED" in output else "bright_red"))
+        return True
+
     if cmd == "/logs":
         lines = get_recent_logs(root_dir, max_lines=35)
         if not lines:
@@ -543,11 +679,14 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
     return False
 
 
-def _build_prompt_session(root_dir: str, model_override: list, session_ref: list) -> PromptSession:
+def _build_prompt_session(root_dir: str, model_override: list, session_ref: list, sandbox_ref: list = None) -> PromptSession:
     history_path = os.path.join(root_dir, ".sova", "history")
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
     completer = merge_completers([
-        WordCompleter(["/provider", "/model", "/new", "/resume", "/undo", "/checkpoints", "/approve", "/logs", "exit", "quit"], sentence=True),
+        WordCompleter([
+            "/provider", "/model", "/search", "/test", "/sandbox", "/new", "/resume",
+            "/undo", "/checkpoints", "/approve", "/logs", "exit", "quit"
+        ], sentence=True),
         PathCompleter(only_directories=False, expanduser=True),
     ])
     bindings = KeyBindings()
@@ -560,7 +699,9 @@ def _build_prompt_session(root_dir: str, model_override: list, session_ref: list
         provider = llm.get_provider()
         model = model_override[0] or llm.get_model()
         sid = session_ref[0]
-        return f" [{provider}:{model}] | session: {sid} | Alt+Enter: newline "
+        sb = sandbox_ref[0] if (sandbox_ref and sandbox_ref[0] and getattr(sandbox_ref[0], "created", False)) else None
+        sb_tag = f" | [🛡️ {sb.branch_name}]" if sb else ""
+        return f" [{provider}:{model}] | session: {sid}{sb_tag} | Alt+Enter: newline "
 
     return PromptSession(
         history=FileHistory(history_path),
@@ -574,8 +715,9 @@ def _build_prompt_session(root_dir: str, model_override: list, session_ref: list
 def main():
     load_dotenv()
     parser = argparse.ArgumentParser(prog="sova")
-    parser.add_argument("--provider", "-p", choices=["groq", "ollama", "nvidia", "openai"], help="LLM provider to use")
+    parser.add_argument("--provider", "-p", choices=llm.get_available_providers(), help="LLM provider to use")
     parser.add_argument("--model", "-m", help="Model name override")
+    parser.add_argument("--sandbox", action="store_true", help="Execute agent tasks in an isolated Git worktree sandbox")
     args = parser.parse_args()
 
     if args.provider:
@@ -585,11 +727,24 @@ def main():
     model_override = [args.model]
     conversation = [None]
     session_ref = [sessions.new_session_id()]
+    sandbox_ref = [None]
 
-    _print_banner(root_dir, session_ref[0])
+    if args.sandbox:
+        from .sandbox import GitWorktreeSandbox, is_git_repo
+        if is_git_repo(root_dir):
+            try:
+                sb = GitWorktreeSandbox(root_dir, task_id=session_ref[0])
+                sb.create()
+                sandbox_ref[0] = sb
+            except Exception as e:
+                console.print(f"[bold red]Failed to initialize Git worktree sandbox: {e}[/bold red]")
+        else:
+            console.print("[bold yellow]Warning: --sandbox specified but directory is not a Git repository. Running in direct mode.[/bold yellow]")
+
+    _print_banner(root_dir, session_ref[0], sandbox_ref)
 
     try:
-        pt_session = _build_prompt_session(root_dir, model_override, session_ref)
+        pt_session = _build_prompt_session(root_dir, model_override, session_ref, sandbox_ref)
     except Exception:
         pt_session = None
 
@@ -605,18 +760,29 @@ def main():
             console.print("\n[muted]Bye![/muted]")
             break
         if task.lower() in {"exit", "quit"}:
+            sb = sandbox_ref[0]
+            if sb and getattr(sb, "created", False) and sb.has_changes():
+                console.print("[bold yellow]Note: Sandbox branch has unmerged changes. Use '/sandbox apply' before exiting if you wish to merge them.[/bold yellow]")
             break
         if not task:
             continue
-        if task.startswith("/") and _handle_command(task, model_override, conversation, root_dir, session_ref):
+        if task.startswith("/") and _handle_command(task, model_override, conversation, root_dir, session_ref, sandbox_ref):
             continue
 
         try:
             result = run_agent(
                 root_dir, task, model=model_override[0], on_event=_render_event,
                 messages=conversation[0], on_permission=_ask_permission, session_id=session_ref[0],
+                sandbox=sandbox_ref[0],
             )
             conversation[0] = result["messages"]
+            metrics = result.get("metrics")
+            if metrics:
+                from .cost import format_token_cost_summary
+                console.print(f"[dim]⚡ {format_token_cost_summary(metrics)}[/dim]")
+            sb = sandbox_ref[0]
+            if sb and getattr(sb, "created", False) and sb.has_changes():
+                console.print("\n[bold yellow]🛡️ Sandbox changes are ready. Use '/sandbox diff' to view diff, '/sandbox apply' to merge, or '/sandbox discard' to cancel.[/bold yellow]")
         except KeyboardInterrupt:
             console.print("\n[muted]Stopped.[/muted]")
         finally:

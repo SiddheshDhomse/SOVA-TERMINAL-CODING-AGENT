@@ -76,12 +76,21 @@ SOVA- Terminal Agent/
 │   ├── sessions/             # Saved full session JSON files
 │   ├── symbols_cache.json    # AST index cache keyed by file mtime
 │   └── worktrees/            # Isolated Git worktrees for sandbox task execution
-└── tests / test_*.py         # Unit test suites (46/46 passing)
+└── tests/                    # Unit test suites (97/97 passing)
+    ├── __init__.py
     ├── test_agent_tools.py   # Tools, syntax validation, newline recovery
     ├── test_checkpoints.py   # Snapshots, rollback, file creation/edit undo
+    ├── test_cost.py          # Token spend & real-time pricing tracker
+    ├── test_diagnostics.py   # AST validation & self-healing syntax loop
+    ├── test_eval.py          # SWE-bench Lite benchmark runner
+    ├── test_llm_models.py    # Model aliases & provider normalization
+    ├── test_providers.py     # Multi-provider client catalog
     ├── test_sandbox.py       # Git worktree creation, diffs, squash merge, discard
+    ├── test_search.py        # Okapi BM25 conceptual code search
     ├── test_sessions.py      # Session persistence, ordering, full replay loading
-    └── test_symbols.py       # AST symbol extraction, caching, and outline queries
+    ├── test_subagents.py     # Subagent roles & hierarchy lifecycle
+    ├── test_symbols.py       # AST symbol extraction, caching, and outline queries
+    └── test_testing.py       # TDD test runner detection & output parser
 ```
 
 ---
@@ -170,7 +179,7 @@ cp .env.example .env
 ### 5.2 Running the Systems
 - **CLI**: `python -m agent.cli` or `sova`
 - **Web UI**: `python -m agent.web` or `sova-web` (http://127.0.0.1:8787)
-- **Unit Tests**: `python -m unittest discover -s . -p "test_*.py"`
+- **Unit Tests**: `python -m unittest discover -s tests -p "test_*.py"` or `pytest`
 - **Toy Benchmark**: `python -m eval.toy_benchmark.run_toy_eval`
 - **SWE-bench Predictions**: `python -m eval.swebench_runner --instance-ids sympy__sympy-20590`
 

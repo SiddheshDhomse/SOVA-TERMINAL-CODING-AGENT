@@ -364,11 +364,44 @@ def _parse_content_tool_calls(content, known_tool_names):
     except Exception:
         pass
 
-    # Attempt 2: regex extract JSON objects from text
-    import re
-    candidates = re.findall(r'(\{(?:[^{}]|(?:\{[^{}]*\}))*\})', text)
+    # Attempt 2: balanced brace extraction of JSON objects from text
+    def _extract_balanced_json(s):
+        candidates = []
+        n = len(s)
+        i = 0
+        while i < n:
+            if s[i] == '{':
+                start = i
+                depth = 0
+                in_str = False
+                esc = False
+                j = i
+                while j < n:
+                    ch = s[j]
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif ch == '\\':
+                            esc = True
+                        elif ch == '"':
+                            in_str = False
+                    else:
+                        if ch == '"':
+                            in_str = True
+                        elif ch == '{':
+                            depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                candidates.append(s[start:j + 1])
+                                i = j
+                                break
+                    j += 1
+            i += 1
+        return candidates
+
     extracted = []
-    for cand in candidates:
+    for cand in _extract_balanced_json(text):
         try:
             data = json.loads(cand)
             if isinstance(data, dict):
@@ -389,10 +422,24 @@ def run_agent(
     root_dir, task, model=None, max_iterations=25, verbose=True, on_event=None, allow_subagents=True,
     messages=None, stop_event=None, on_permission=None, session_id=None, force_task=False,
     system_prompt=None, custom_tools=None, subagent_id=None, subagent_role=None,
+    sandbox=None,
 ):
-    """Run the agent on `task` inside `root_dir` until completion, stop, or max_iterations."""
+    """Run the agent on `task` inside `root_dir` (or sandbox worktree if provided) until completion, stop, or max_iterations."""
+    exec_dir = root_dir
+    if sandbox is not None:
+        if not getattr(sandbox, "created", False):
+            sandbox.create()
+        exec_dir = sandbox.worktree_dir
+
+    import time
+    start_time = time.time()
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_cost_usd = 0.0
+    turn_count = 0
+
     trajectory = SessionTrajectoryLogger(root_dir, session_id) if session_id else None
-    log_info(f"Starting agent task in {root_dir} (session={session_id}, provider={get_provider()})", root_dir)
+    log_info(f"Starting agent task in {exec_dir} (session={session_id}, provider={get_provider()}, sandbox={bool(sandbox)})", root_dir)
 
     def emit(event_type, **data):
         if trajectory:
@@ -403,6 +450,23 @@ def run_agent(
             _print_event(event_type, data)
 
     def _finish(result):
+        total_tokens = total_prompt_tokens + total_completion_tokens
+        elapsed = round(time.time() - start_time, 2)
+        result["metrics"] = {
+            "turns": turn_count,
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_tokens,
+            "cost_usd": round(total_cost_usd, 6),
+            "elapsed_seconds": elapsed,
+        }
+        if sandbox is not None:
+            result["sandbox"] = {
+                "active": True,
+                "branch": getattr(sandbox, "branch_name", ""),
+                "worktree": exec_dir,
+                "has_changes": sandbox.has_changes(),
+            }
         if session_id:
             try:
                 events = trajectory.get_trajectory() if trajectory else None
@@ -412,12 +476,20 @@ def run_agent(
                     messages,
                     result=result,
                     events=events,
-                    metadata={"provider": get_provider(), "model": model or get_model()},
+                    metadata={
+                        "provider": get_provider(),
+                        "model": model or get_model(),
+                        "metrics": result.get("metrics"),
+                    },
                 )
             except OSError:
                 pass
         cleanup_jobs()
-        log_info(f"Task finished: session={session_id}, finished={result.get('finished')}", root_dir)
+        try:
+            cost_display = f"${float(total_cost_usd):.4f}"
+        except (TypeError, ValueError):
+            cost_display = "$0.00"
+        log_info(f"Task finished: session={session_id}, finished={result.get('finished')}, tokens={total_tokens}, cost={cost_display}", root_dir)
         return result
 
     def _stopped():
@@ -425,11 +497,14 @@ def run_agent(
         cleanup_jobs()
         return _finish({"messages": messages, "finished": False, "summary": "Stopped by user"})
 
+    if sandbox is not None:
+        emit("sandbox_status", active=True, branch=getattr(sandbox, "branch_name", ""), worktree=exec_dir)
+
     emit("user_prompt", text=task)
     if custom_tools is not None:
         schemas, impls = custom_tools
     else:
-        schemas, impls = build_tools(root_dir, session_id=session_id)
+        schemas, impls = build_tools(exec_dir, session_id=session_id)
 
     if allow_subagents:
         import uuid
@@ -450,7 +525,7 @@ def run_agent(
             )
 
             # Partition tools according to role permissions
-            base_schemas, base_impls = build_tools(root_dir, session_id=session_id)
+            base_schemas, base_impls = build_tools(exec_dir, session_id=session_id)
             sub_schemas, sub_impls = filter_tools_for_role(base_schemas, base_impls, role_cfg.allowed_tools)
 
             def _sub_event(event):
@@ -526,8 +601,8 @@ def run_agent(
             return _finish({"messages": messages, "finished": False, "summary": summary})
         message = response.choices[0].message
         messages.append(message.model_dump(exclude_none=True))
-        emit("answer", text=message.content, verified=False)
-        return _finish({"messages": messages, "finished": False, "summary": message.content})
+        emit("answer", text=message.content, verified=True, chat=True)
+        return _finish({"messages": messages, "finished": True, "summary": message.content, "chat": True})
 
     last_failure = None
     repeat_count = 0
@@ -558,6 +633,35 @@ def run_agent(
             messages.append({"role": "user", "content": retry_hint})
             continue
         malformed_retries = 0
+
+        turn_count += 1
+        p_tok = 0
+        c_tok = 0
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            try:
+                p_val = getattr(usage, "prompt_tokens", 0)
+                c_val = getattr(usage, "completion_tokens", 0)
+                p_tok = int(p_val) if p_val is not None else 0
+                c_tok = int(c_val) if c_val is not None else 0
+                total_prompt_tokens += p_tok
+                total_completion_tokens += c_tok
+                active_prov = get_provider()
+                active_model = model or get_model()
+                from .cost import calculate_turn_cost
+                turn_cost = calculate_turn_cost(active_prov, active_model, p_tok, c_tok)
+                total_cost_usd += turn_cost
+                emit(
+                    "token_usage",
+                    turn=turn_count,
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=p_tok + c_tok,
+                    cost_usd=turn_cost,
+                    cumulative_cost=round(total_cost_usd, 6),
+                )
+            except (TypeError, ValueError):
+                pass
 
         message = response.choices[0].message
         messages.append(message.model_dump(exclude_none=True))
@@ -628,7 +732,17 @@ def run_agent(
             else:
                 try:
                     raw = func(**args)
-                    result, diff = raw if isinstance(raw, tuple) else (raw, None)
+                    if isinstance(raw, tuple):
+                        if len(raw) == 2:
+                            result, diff = raw
+                        elif len(raw) == 3 and isinstance(raw[0], bool):
+                            result, diff = raw[1], None
+                        elif len(raw) >= 1:
+                            result, diff = raw[0], (raw[1] if len(raw) > 1 else None)
+                        else:
+                            result, diff = None, None
+                    else:
+                        result, diff = raw, None
                 except TypeError as exc:
                     expected = list(inspect.signature(func).parameters)
                     result = f"ERROR: invalid arguments for '{name}' ({exc}). Expected keys: {expected}"
@@ -636,6 +750,9 @@ def run_agent(
                     result = f"ERROR: {exc}"
 
             emit("tool_result", name=name, result=result, diff=diff)
+
+            if isinstance(result, str) and "[WARNING] SYNTAX/LINT ERROR DETECTED" in result:
+                emit("diagnostic_warning", name=name, message=result)
 
             is_error = isinstance(result, str) and result.startswith("ERROR")
             if name == "todo_write" and not is_error:

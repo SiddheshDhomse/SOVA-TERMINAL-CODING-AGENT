@@ -348,6 +348,44 @@ _SCHEMAS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_code",
+            "description": (
+                "Search code by natural language query or concept across the workspace using Okapi BM25 ranking. "
+                "Useful when you don't know the exact symbol name or regex, e.g. 'JWT token expiration', "
+                "'sqlite database pool', 'calculate discount'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language query or keywords to search for."},
+                    "path": {"type": "string", "description": "Optional file path or substring filter."},
+                    "top_k": {"type": "integer", "description": "Maximum number of code snippets to return (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": (
+                "Run test suites (auto-detects pytest, unittest, npm test, cargo test) with concise failure diagnosis. "
+                "Use this tool to reproduce issues, verify bug fixes, or run specific test scripts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Optional test file or test target (e.g. 'test_auth.py')."},
+                    "command": {"type": "string", "description": "Optional custom test shell command override."},
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -371,6 +409,8 @@ def build_tools(root_dir, session_id=None):
         full = _resolve(path)
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
+        if not lines:
+            return "(empty file)"
         end_line = end_line or len(lines)
         chunk = lines[start_line - 1:end_line]
 
@@ -383,17 +423,13 @@ def build_tools(root_dir, session_id=None):
 
         output = "".join(f"{i}: {line}" for i, line in enumerate(chunk, start=start_line))
         if len(output) > 5000:
-            output = output[:5000] + "\n... [Truncated to stay within token limits. Use start_line/end_line to inspect specific lines]\n"
+            cut_idx = output.rfind("\n", 0, 5000)
+            if cut_idx == -1:
+                cut_idx = 5000
+            output = output[:cut_idx] + "\n... [Truncated to stay within token limits. Use start_line/end_line to inspect specific lines]\n"
         return output
 
-    def _check_python_syntax(path, content):
-        if not path.endswith(".py"):
-            return None
-        try:
-            compile(content, path, "exec")
-            return None
-        except SyntaxError as exc:
-            return f"SyntaxError: {exc.msg} (line {exc.lineno})"
+    from .diagnostics import format_diagnostic_feedback, run_fast_diagnostics
 
     def _normalize_content(content):
         if not isinstance(content, str):
@@ -417,8 +453,8 @@ def build_tools(root_dir, session_id=None):
         checkpoint_mgr.record_before_change(path, "write_file")
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
-        error = _check_python_syntax(path, content)
-        suffix = f" ERROR: {error}" if error else ""
+        diag = run_fast_diagnostics(path, content)
+        suffix = format_diagnostic_feedback(diag) if diag else ""
         return f"Wrote {len(content)} chars to {path}.{suffix}", unified_diff(path, old_content, content)
 
     def edit_file(path, old_str, new_str, start_line=None, end_line=None, line_start=None, line_end=None):
@@ -440,6 +476,8 @@ def build_tools(root_dir, session_id=None):
 
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
+
+        has_crlf = "\r\n" in content
 
         # Normalize CRLF/LF to prevent cross-platform line ending mismatch
         content_norm = content.replace("\r\n", "\n")
@@ -468,12 +506,14 @@ def build_tools(root_dir, session_id=None):
                 return f"ERROR: old_str matches {count} times in {path}. Provide start_line and end_line to narrow down target location."
             new_content = content_norm.replace(old_norm, new_norm, 1)
 
+        final_content = new_content.replace("\r\n", "\n").replace("\n", "\r\n") if has_crlf else new_content
+
         checkpoint_mgr.record_before_change(path, "edit_file")
         with open(full, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        error = _check_python_syntax(path, new_content)
-        suffix = f" ERROR: {error}" if error else ""
-        return f"Edited {path}.{suffix}", unified_diff(path, content, new_content)
+            f.write(final_content)
+        diag = run_fast_diagnostics(path, final_content)
+        suffix = format_diagnostic_feedback(diag) if diag else ""
+        return f"Edited {path}.{suffix}", unified_diff(path, content, final_content)
 
     def list_dir(path="."):
         full = _resolve(path)
@@ -636,6 +676,17 @@ def build_tools(root_dir, session_id=None):
     def workspace_summary():
         return symbol_index.get_workspace_summary()
 
+    from .search import BM25Index
+    search_index = BM25Index(root_dir)
+
+    def search_code(query, path=None, top_k=5):
+        return search_index.format_search_results(query, path_filter=path, top_k=top_k)
+
+    from .testing import run_tests as _exec_tests
+
+    def run_tests(target=None, command=None):
+        return _exec_tests(root_dir, target=target, command=command)
+
     impls = {
         "read_file": read_file,
         "write_file": write_file,
@@ -653,6 +704,8 @@ def build_tools(root_dir, session_id=None):
         "find_definition": find_definition,
         "find_references": find_references,
         "workspace_summary": workspace_summary,
+        "search_code": search_code,
+        "run_tests": run_tests,
         "finish": finish,
         "undo": checkpoint_mgr.undo_last,
         "_checkpoints": checkpoint_mgr,

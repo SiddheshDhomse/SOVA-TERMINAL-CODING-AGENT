@@ -14,6 +14,8 @@ DEFAULT_MODELS = {
     "ollama": "llama3.1:8b",
     "nvidia": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "openai": "gpt-4o",
+    "gemini": "gemini-2.5-flash",
+    "openrouter": "anthropic/claude-3.7-sonnet",
 }
 
 PROVIDERS_CONFIG = {
@@ -63,6 +65,31 @@ PROVIDERS_CONFIG = {
         ],
         "default_budget": 64000,
     },
+    "gemini": {
+        "name": "Google Gemini (Official AI Studio)",
+        "default": "gemini-2.5-flash",
+        "recommended": [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+        ],
+        "default_budget": 64000,
+    },
+    "openrouter": {
+        "name": "OpenRouter (Claude, Gemini, DeepSeek)",
+        "default": "anthropic/claude-3.7-sonnet",
+        "recommended": [
+            "anthropic/claude-3.7-sonnet",
+            "anthropic/claude-3.5-sonnet",
+            "google/gemini-2.5-pro",
+            "google/gemini-2.5-flash",
+            "deepseek/deepseek-r1",
+            "deepseek/deepseek-chat",
+            "openai/gpt-4o",
+            "openai/o3-mini",
+        ],
+        "default_budget": 64000,
+    },
 }
 
 MODEL_ALIASES = {
@@ -77,8 +104,10 @@ MODEL_ALIASES = {
         "gpt-oss 20b": "openai/gpt-oss-20b",
         "gpt-oss-20b": "openai/gpt-oss-20b",
         "openai/gpt-oss-20b": "openai/gpt-oss-20b",
-        "llama 3.3 70b versatile": "openai/gpt-oss-120b",
-        "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+        "llama 3.3 70b versatile": "llama-3.3-70b-versatile",
+        "llama-3.3-70b-versatile": "llama-3.3-70b-versatile",
+        "llama3 70b 8192": "openai/gpt-oss-120b",
+        "llama3-70b-8192": "openai/gpt-oss-120b",
         "llama 3.1 8b instant": "llama-3.1-8b-instant",
         "llama-3.1-8b-instant": "llama-3.1-8b-instant",
     },
@@ -209,8 +238,18 @@ def get_client() -> OpenAI:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set or invalid. Please add your OpenAI API key in Settings or .env file.")
         base_url = None
+    elif provider == "gemini":
+        api_key = _creds.get_active_credential("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set or invalid. Please add your Google Gemini API key in Settings or .env file.")
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    elif provider == "openrouter":
+        api_key = _creds.get_active_credential("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is not set or invalid. Please add your OpenRouter API key in Settings or .env file.")
+        base_url = "https://openrouter.ai/api/v1"
     else:
-        raise RuntimeError(f"Unknown SOVA_PROVIDER '{provider}'. Use 'groq', 'ollama', 'nvidia', or 'openai'.")
+        raise RuntimeError(f"Unknown SOVA_PROVIDER '{provider}'. Use 'groq', 'ollama', 'nvidia', 'openai', 'gemini', or 'openrouter'.")
 
     _client = OpenAI(api_key=api_key, base_url=base_url)
     _client_provider = provider

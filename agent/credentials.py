@@ -135,6 +135,8 @@ def get_known_keys() -> List[Dict[str, str]]:
     return [
         {"key": "GROQ_API_KEY", "label": "Groq API Key", "category": "llm", "hint": "console.groq.com"},
         {"key": "OPENAI_API_KEY", "label": "OpenAI API Key", "category": "llm", "hint": "platform.openai.com"},
+        {"key": "GEMINI_API_KEY", "label": "Google Gemini API Key", "category": "llm", "hint": "aistudio.google.com"},
+        {"key": "OPENROUTER_API_KEY", "label": "OpenRouter API Key", "category": "llm", "hint": "openrouter.ai"},
         {"key": "NVIDIA_API_KEY", "label": "Nvidia NIM API Key", "category": "llm", "hint": "build.nvidia.com"},
         {"key": "SOVA_OLLAMA_HOST", "label": "Ollama Host URL", "category": "llm", "hint": "http://localhost:11434"},
     ]
@@ -156,6 +158,12 @@ def test_credential(root_dir: str, key: str, value: Optional[str] = None) -> dic
 
     if key == "OPENAI_API_KEY":
         return _test_openai_compatible(target_val, base_url=None, label="OpenAI")
+
+    if key == "GEMINI_API_KEY":
+        return _test_openai_compatible(target_val, base_url="https://generativelanguage.googleapis.com/v1beta/openai/", label="Google Gemini")
+
+    if key == "OPENROUTER_API_KEY":
+        return _test_openai_compatible(target_val, base_url="https://openrouter.ai/api/v1", label="OpenRouter")
 
     if key == "NVIDIA_API_KEY":
         return _test_openai_compatible(target_val, base_url="https://integrate.api.nvidia.com/v1", label="Nvidia")

@@ -129,7 +129,11 @@ sb-cli get-report swe-bench_lite test my_run -o ./reports
 
 ### 3. Unit Test Suite
 ```powershell
-python -m unittest discover -s . -p "test_*.py"
+# Run all tests using unittest
+python -m unittest discover -s tests -p "test_*.py"
+
+# Or using pytest (auto-configured in pyproject.toml)
+pytest
 ```
 
 ---
