@@ -3,7 +3,17 @@ import argparse
 import json
 import os
 import random
+import sys
 import threading
+import time
+
+# Force UTF-8 encoding on standard streams to prevent Windows codepage corruption (CP1252/CP437)
+if hasattr(sys.stdout, "reconfigure") and sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from dotenv import load_dotenv
 from prompt_toolkit import PromptSession
@@ -14,6 +24,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
@@ -45,6 +56,7 @@ _LOGO = r"""███████╗ ██████╗ ██╗   ██╗
 
 _THINKING_PHRASES = [
     "thinking...",
+    "GANPATI BAPPA MORYA...!!!",
     "bribing the hamster...",
     "herding cats...",
     "consulting the rubber duck...",
@@ -57,6 +69,7 @@ _THINKING_PHRASES = [
     "polishing the bits...",
     "counting sheep...",
     "summoning the compiler gremlins...",
+
     "analyzing codebase...",
     "inspecting file structure...",
     "checking syntax & dependencies...",
@@ -67,6 +80,16 @@ _THINKING_PHRASES = [
 
 _status = {"handle": None, "thread": None, "stop": threading.Event(), "buffer": ""}
 _auto_approve = {"value": False}
+
+
+def _prompt_input(prompt_markup: str) -> str:
+    """Safely prompt the user for input without Rich console.input line-erasure artifacts."""
+    console.print(prompt_markup, end="")
+    sys.stdout.flush()
+    try:
+        return input().strip()
+    except (KeyboardInterrupt, EOFError):
+        return ""
 
 
 def _cycle_phrases(handle, prefix) -> None:
@@ -103,18 +126,18 @@ def _print_diff(diff_text: str, prefix: str = "") -> None:
         else:
             body.append(line + "\n", style="muted")
     if len(lines) > 200:
-        body.append(f"… {len(lines) - 200} more lines\n", style="muted")
+        body.append(f"... {len(lines) - 200} more lines\n", style="muted")
     console.print(Panel(body, border_style="muted", padding=(0, 1)))
 
 
 def _print_todo(todos: list) -> None:
-    marks = {"completed": "[green]✔[/green]", "in_progress": "[bright_cyan]➤[/bright_cyan]"}
-    lines = [f"{marks.get(t.get('status'), '☐')} {t.get('content', '')}" for t in todos]
+    marks = {"completed": "[green][OK][/green]", "in_progress": "[bright_cyan]>[/bright_cyan]"}
+    lines = [f"{marks.get(t.get('status'), '[ ]')} {t.get('content', '')}" for t in todos]
     console.print(Panel("\n".join(lines) or "(empty)", title="[muted]Todo Plan[/muted]", border_style="muted"))
 
 
 def _ask_permission(name: str, args: dict) -> bool:
-    """interactive permission options box with formatted previews."""
+    """Interactive permission request box."""
     if _auto_approve["value"]:
         return True
     _stop_spinner()
@@ -135,9 +158,9 @@ def _ask_permission(name: str, args: dict) -> bool:
             old_lines = len(existing_content.splitlines())
             new_lines = len(content.splitlines())
             console.print(Panel(
-                f"[bold bright_red]⚠️  WARNING: OVERWRITING EXISTING FILE![/bold bright_red]\n"
+                f"[bold bright_red][WARNING] OVERWRITING EXISTING FILE![/bold bright_red]\n"
                 f"[white]{path}[/white] currently has [bold yellow]{old_lines}[/bold yellow] lines. "
-                f"This will replace the entire file with [bold yellow]{new_lines}[/bold yellow] lines.",
+                f"This will replace the file with [bold yellow]{new_lines}[/bold yellow] lines.",
                 title="[bold red]Destructive Overwrite Alert[/bold red]",
                 border_style="bright_red",
                 padding=(0, 2),
@@ -154,7 +177,7 @@ def _ask_permission(name: str, args: dict) -> bool:
             syntax_preview = Syntax(preview_code, lang, theme="monokai", line_numbers=True, word_wrap=True)
             console.print(Panel(
                 syntax_preview,
-                title=f"[bold bright_cyan]📄 New File: [white]{path}[/white] ({len(content)} chars)[/bold bright_cyan]",
+                title=f"[bold bright_cyan][File] New File: [white]{path}[/white] ({len(content)} chars)[/bold bright_cyan]",
                 border_style="bright_cyan",
                 padding=(0, 1),
             ))
@@ -168,14 +191,14 @@ def _ask_permission(name: str, args: dict) -> bool:
         else:
             console.print(Panel(
                 f"[bright_red]- {old_str}[/bright_red]\n[bright_green]+ {new_str}[/bright_green]",
-                title=f"[bold bright_cyan]✏️ Edit File: [white]{path}[/white][/bold bright_cyan]",
+                title=f"[bold bright_cyan][Edit] File: [white]{path}[/white][/bold bright_cyan]",
                 border_style="bright_cyan",
             ))
     elif name == "run_shell":
         cmd = args.get("command", "")
         console.print(Panel(
             f"[bold bright_green]$[/bold bright_green] [white]{cmd}[/white]",
-            title="[bold yellow]⚡ Execute Shell Command[/bold yellow]",
+            title="[bold yellow][Exec] Execute Shell Command[/bold yellow]",
             border_style="yellow",
             padding=(0, 1),
         ))
@@ -193,19 +216,16 @@ def _ask_permission(name: str, args: dict) -> bool:
     console.print(Panel(options_box, border_style="yellow", padding=(0, 2)))
 
     while True:
-        try:
-            choice = console.input("[bold yellow]❯ Select [y/a/n/c] (default: y): [/bold yellow]").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            return False
+        choice = _prompt_input("[bold yellow]> Select [y/a/n/c] (default: y): [/bold yellow]").lower()
 
         if not choice or choice == "y":
             return True
         elif choice == "a":
             _auto_approve["value"] = True
-            console.print("[bright_cyan]✓ Auto-approval enabled for the rest of this session.[/bright_cyan]")
+            console.print("[bright_cyan][OK] Auto-approval enabled for the rest of this session.[/bright_cyan]")
             return True
         elif choice == "n":
-            console.print("[bright_red]✗ Tool execution denied by user.[/bright_red]")
+            console.print("[bright_red][X] Tool execution denied by user.[/bright_red]")
             return False
         elif choice == "c":
             console.print("[yellow]Task cancelled by user.[/yellow]")
@@ -216,7 +236,53 @@ def _ask_permission(name: str, args: dict) -> bool:
 
 def _render_event(event: dict) -> None:
     etype = event["type"]
-    prefix = f"  ↳ [muted]({event['subagent']})[/muted] " if event.get("subagent") else ""
+
+    if etype == "subagent_start":
+        _stop_spinner()
+        role = event.get("role", "general")
+        icon = event.get("icon", "🤖")
+        name = event.get("name", "Sub-Agent")
+        task_text = event.get("task", "")
+        if role == "researcher":
+            badge = f"[bold cyan]{icon} {name}[/bold cyan]"
+        elif role == "coder":
+            badge = f"[bold green]{icon} {name}[/bold green]"
+        elif role == "reviewer":
+            badge = f"[bold magenta]{icon} {name}[/bold magenta]"
+        else:
+            badge = f"[bold blue]{icon} {name}[/bold blue]"
+        console.print(f"\n[dim]├──[/dim] {badge} [bold white]{task_text}[/bold white]")
+        return
+
+    if etype == "subagent_finish":
+        _stop_spinner()
+        icon = event.get("icon", "🤖")
+        name = event.get("name", "Sub-Agent")
+        success = event.get("success", False)
+        summary = event.get("summary", "")
+        if success:
+            console.print(f"[dim]└──[/dim] [bold bright_green]✔ {icon} {name} completed[/bold bright_green]: [white]{summary}[/white]\n")
+        else:
+            console.print(f"[dim]└──[/dim] [bold yellow]⚠ {icon} {name} incomplete[/bold yellow]: [white]{summary}[/white]\n")
+        return
+
+    sub_role = event.get("subagent_role") or ""
+    sub_name = event.get("subagent_name") or event.get("subagent") or "Sub"
+    sub_icon = event.get("subagent_icon") or "🤖"
+    if sub_role == "researcher":
+        role_tag = f"[bold cyan]{sub_icon} {sub_name}[/bold cyan]"
+    elif sub_role == "coder":
+        role_tag = f"[bold green]{sub_icon} {sub_name}[/bold green]"
+    elif sub_role == "reviewer":
+        role_tag = f"[bold magenta]{sub_icon} {sub_name}[/bold magenta]"
+    elif sub_role == "general":
+        role_tag = f"[bold blue]{sub_icon} {sub_name}[/bold blue]"
+    else:
+        role_tag = f"[muted]({sub_name})[/muted]"
+
+    is_sub = bool(event.get("subagent_id") or event.get("subagent"))
+    prefix = f"[dim]│   ├──[/dim] {role_tag} " if is_sub else ""
+    sub_indent = "[dim]│   │[/dim]   " if is_sub else ""
 
     if etype == "thinking":
         if _status["handle"] is None:
@@ -241,36 +307,36 @@ def _render_event(event: dict) -> None:
         name = event["name"]
         args = event.get("args") or {}
         if name == "write_file":
-            console.print(f"{prefix}⟳ [tool.name]write_file[/tool.name] [white]{args.get('path')}[/white] ({len(str(args.get('content', '')))} chars)")
+            console.print(f"{prefix}* [tool.name]write_file[/tool.name] [white]{args.get('path')}[/white] ({len(str(args.get('content', '')))} chars)")
         elif name == "edit_file":
-            console.print(f"{prefix}⟳ [tool.name]edit_file[/tool.name] [white]{args.get('path')}[/white]")
+            console.print(f"{prefix}* [tool.name]edit_file[/tool.name] [white]{args.get('path')}[/white]")
         elif name == "read_file":
             lines_range = f" (lines {args.get('start_line', 1)}-{args.get('end_line', 'end')})" if args.get('start_line') or args.get('end_line') else ""
-            console.print(f"{prefix}⟳ [tool.name]read_file[/tool.name] [white]{args.get('path')}{lines_range}[/white]")
+            console.print(f"{prefix}* [tool.name]read_file[/tool.name] [white]{args.get('path')}{lines_range}[/white]")
         elif name == "run_shell":
-            console.print(f"{prefix}⟳ [tool.name]run_shell[/tool.name] [bold green]$[/bold green] {args.get('command')}")
+            console.print(f"{prefix}* [tool.name]run_shell[/tool.name] [bold green]$[/bold green] {args.get('command')}")
         elif name == "grep":
-            console.print(f"{prefix}⟳ [tool.name]grep[/tool.name] '{args.get('pattern')}' in {args.get('path', '.')}")
+            console.print(f"{prefix}* [tool.name]grep[/tool.name] '{args.get('pattern')}' in {args.get('path', '.')}")
         elif name == "find_files":
-            console.print(f"{prefix}⟳ [tool.name]find_files[/tool.name] '{args.get('pattern')}'")
+            console.print(f"{prefix}* [tool.name]find_files[/tool.name] '{args.get('pattern')}'")
         elif name == "finish":
-            console.print(f"{prefix}✓ [bold bright_green]finish[/bold bright_green]")
+            console.print(f"{prefix}[OK] [bold bright_green]finish[/bold bright_green]")
         else:
-            console.print(f"{prefix}⟳ [tool.name]{name}[/tool.name]({args})")
+            console.print(f"{prefix}* [tool.name]{name}[/tool.name]({args})")
     elif etype == "tool_result":
         text = str(event["result"])
         if len(text) > 400:
-            text = text[:400] + " …"
-        console.print(f"{prefix}  {text}", style="tool.result")
+            text = text[:400] + " ..."
+        console.print(f"{sub_indent}  {text}", style="tool.result")
         if event.get("diff"):
-            _print_diff(event["diff"], prefix)
+            _print_diff(event["diff"], sub_indent)
     elif etype == "todo":
         _print_todo(event.get("todos") or [])
     elif etype == "answer":
         text = event.get("text") or ""
         rendered = Markdown(text) if text.strip() else Text("")
-        if event.get("subagent"):
-            console.print(f"{prefix}✓ {text}", style="tool.result")
+        if is_sub:
+            console.print(f"{sub_indent}[OK] {text}", style="tool.result")
         elif event.get("verified"):
             console.print(Panel(rendered, title="[bold bright_green]Sova[/bold bright_green]", border_style="answer"))
         else:
@@ -299,14 +365,16 @@ def _print_banner(root_dir: str, session_id: str) -> None:
     console.print(Panel(body, border_style="brand", padding=(1, 2)))
     commands = Panel(
         "[muted]Commands:\n"
-        "  /provider     — Select LLM provider (Groq, Ollama, Nvidia, OpenAI)\n"
-        "  /model        — Select or override model (with dynamic recommendations)\n"
-        "  /resume       — List and resume past conversations\n"
-        "  /new          — Start a new conversation context\n"
-        "  /approve      — Toggle auto-approval of sensitive actions\n"
-        "  /logs         — View recent execution logs\n"
-        "  Alt+Enter     — Insert newline in multi-line prompt\n"
-        "  exit, quit    — Exit agent[/muted]",
+        "  /provider     - Select LLM provider (Groq, Ollama, Nvidia, OpenAI)\n"
+        "  /model        - Select or override model (with dynamic recommendations)\n"
+        "  /resume       - List and resume past conversations\n"
+        "  /new          - Start a new conversation context\n"
+        "  /undo         - Rollback the last file modification made by SOVA\n"
+        "  /checkpoints  - List file modification history for this session\n"
+        "  /approve      - Toggle auto-approval of sensitive actions\n"
+        "  /logs         - View recent execution logs\n"
+        "  Alt+Enter     - Insert newline in multi-line prompt\n"
+        "  exit, quit    - Exit agent[/muted]",
         title="[muted]Quick Commands[/muted]",
         border_style="muted",
     )
@@ -332,9 +400,10 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
             for i, p in enumerate(providers, start=1):
                 cfg = llm.PROVIDERS_CONFIG.get(p, {})
                 active_mark = " (active)" if p == llm.get_provider() else ""
-                lines.append(f"  [bright_cyan][{i}][/bright_cyan] [bold]{p}[/bold] — {cfg.get('name', '')}{active_mark}")
+                name_str = cfg.get('name', '')
+                lines.append(f"  [bright_cyan]{i}[/bright_cyan] [bold]{p}[/bold] - {name_str}{active_mark}")
             console.print(Panel("\n".join(lines), title="[bold bright_cyan]Select LLM Provider[/bold bright_cyan]", border_style="bright_cyan"))
-            choice = console.input("[bold bright_cyan]❯ Select [1-N or name, Enter to cancel]: [/bold bright_cyan]").strip().lower()
+            choice = _prompt_input("[bold bright_cyan]> Select [1-N or name, Enter to cancel]: [/bold bright_cyan]").lower()
             if not choice:
                 return True
             if choice.isdigit() and 1 <= int(choice) <= len(providers):
@@ -359,16 +428,16 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
             lines = []
             for i, m in enumerate(recommended, start=1):
                 active_mark = " (active)" if m == llm.get_model() else ""
-                lines.append(f"  [bright_cyan][{i}][/bright_cyan] {m}{active_mark}")
-            lines.append("  [bright_cyan][c][/bright_cyan] Enter custom model name...")
+                lines.append(f"  [bright_cyan]{i}[/bright_cyan] {m}{active_mark}")
+            lines.append("  [bright_cyan]c[/bright_cyan] Enter custom model name...")
             console.print(Panel("\n".join(lines), title=f"[bold bright_cyan]Select Model for '{current_prov}'[/bold bright_cyan]", border_style="bright_cyan"))
-            choice = console.input("[bold bright_cyan]❯ Select [1-N, 'c' for custom, Enter to cancel]: [/bold bright_cyan]").strip()
+            choice = _prompt_input("[bold bright_cyan]> Select [1-N, 'c' for custom, Enter to cancel]: [/bold bright_cyan]")
             if not choice:
                 return True
             if choice.isdigit() and 1 <= int(choice) <= len(recommended):
                 chosen = recommended[int(choice) - 1]
             elif choice.lower() == "c":
-                chosen = console.input("[bold bright_cyan]Enter custom model name: [/bold bright_cyan]").strip()
+                chosen = _prompt_input("[bold bright_cyan]Enter custom model name: [/bold bright_cyan]")
                 if not chosen:
                     return True
             else:
@@ -384,6 +453,36 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
         console.print(f"Auto-approval of sensitive actions is now [bold]{state}[/bold].", style="muted")
         return True
 
+    if cmd == "/undo":
+        from .checkpoints import CheckpointManager
+        cm = CheckpointManager(root_dir, session_ref[0])
+        success, msg, restored = cm.undo_last()
+        if success:
+            console.print(f"[bold bright_green][OK] {msg}[/bold bright_green]")
+        else:
+            console.print(f"[bold yellow][WARNING] {msg}[/bold yellow]")
+        return True
+
+    if cmd == "/checkpoints":
+        from .checkpoints import CheckpointManager
+        cm = CheckpointManager(root_dir, session_ref[0])
+        chk_history = cm.list_checkpoints()
+        if not chk_history:
+            console.print("No file modifications recorded in this session.", style="muted")
+            return True
+        table = Table(title="[bold bright_cyan]Session File Checkpoints[/bold bright_cyan]", border_style="bright_cyan")
+        table.add_column("#", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Time", style="dim")
+        table.add_column("Action", style="yellow")
+        table.add_column("File Path", style="bold")
+        table.add_column("Original State", style="magenta")
+        for c in chk_history:
+            t = time.strftime("%H:%M:%S", time.localtime(c.get("timestamp", 0)))
+            state_label = "Existed (Backed up)" if c.get("existed_before") else "Created (New)"
+            table.add_row(str(c.get("step_id")), t, c.get("action", ""), c.get("file_path", ""), state_label)
+        console.print(table)
+        return True
+
     if cmd == "/resume":
         arg = parts[1].strip() if len(parts) > 1 else ""
         if not arg:
@@ -391,15 +490,24 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
             if not rows:
                 console.print("No saved sessions yet.", style="muted")
                 return True
-            lines = []
-            for i, r in enumerate(rows[:10], start=1):
-                mark = "[bright_green]✔[/bright_green]" if r["finished"] else "[muted]…[/muted]"
-                lines.append(f"  [bright_cyan][{i}][/bright_cyan] {r['id']}  {mark}  {r['first_message']}")
-            console.print(Panel("\n".join(lines), title="[bold bright_cyan]Select Session to Resume[/bold bright_cyan]", border_style="bright_cyan"))
-            choice = console.input("[bold bright_cyan]❯ Select [1-N or ID, Enter to cancel]: [/bold bright_cyan]").strip()
+            table = Table(title="[bold bright_cyan]Available Sessions to Resume[/bold bright_cyan]", border_style="bright_cyan")
+            table.add_column("#", justify="right", style="cyan", no_wrap=True)
+            table.add_column("Session ID", style="bold")
+            table.add_column("Last Active", style="dim")
+            table.add_column("Msgs", justify="right")
+            table.add_column("Status", justify="center")
+            table.add_column("Title / First Prompt", style="white")
+
+            for i, r in enumerate(rows[:15], start=1):
+                t_str = time.strftime("%b %d %H:%M", time.localtime(r.get("updated_at", 0)))
+                status = "[bright_green][OK] Done[/bright_green]" if r.get("finished") else "[yellow]... Active[/yellow]"
+                table.add_row(str(i), r["id"], t_str, str(r.get("message_count", 0)), status, r.get("first_message", "")[:45])
+            console.print(table)
+
+            choice = _prompt_input("[bold bright_cyan]> Select [1-N or ID, Enter to cancel]: [/bold bright_cyan]")
             if not choice:
                 return True
-            if choice.isdigit() and 1 <= int(choice) <= len(rows[:10]):
+            if choice.isdigit() and 1 <= int(choice) <= len(rows[:15]):
                 arg = rows[int(choice) - 1]["id"]
             else:
                 arg = choice
@@ -409,7 +517,19 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
             console.print(f"Could not load session '{arg}'.", style="error")
             return True
         session_ref[0] = arg
-        console.print(f"Resumed session '{arg}' ({len(conversation[0])} messages).", style="muted")
+        console.print(f"[bright_green][OK] Resumed session '{arg}' ({len(conversation[0])} messages).[/bright_green]")
+
+        # Display context recap of recent turns
+        recent_turns = [m for m in conversation[0] if m.get("role") in ("user", "assistant") and m.get("content")]
+        if recent_turns:
+            recap_lines = []
+            for m in recent_turns[-3:]:
+                role_label = "[bold bright_cyan]User:[/bold bright_cyan]" if m.get("role") == "user" else "[bold bright_green]SOVA:[/bold bright_green]"
+                snippet = str(m.get("content", "")).strip()
+                if len(snippet) > 200:
+                    snippet = snippet[:197] + "..."
+                recap_lines.append(f"{role_label} {snippet}")
+            console.print(Panel("\n\n".join(recap_lines), title=f"[bold]Context Recap ({arg})[/bold]", border_style="muted"))
         return True
 
     if cmd == "/logs":
@@ -427,7 +547,7 @@ def _build_prompt_session(root_dir: str, model_override: list, session_ref: list
     history_path = os.path.join(root_dir, ".sova", "history")
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
     completer = merge_completers([
-        WordCompleter(["/provider", "/model", "/new", "/resume", "/approve", "/logs", "exit", "quit"], sentence=True),
+        WordCompleter(["/provider", "/model", "/new", "/resume", "/undo", "/checkpoints", "/approve", "/logs", "exit", "quit"], sentence=True),
         PathCompleter(only_directories=False, expanduser=True),
     ])
     bindings = KeyBindings()
@@ -476,9 +596,9 @@ def main():
     while True:
         try:
             if pt_session is not None:
-                task = pt_session.prompt("\n❯ Enter task: ").strip()
+                task = pt_session.prompt("\n> Enter task: ").strip()
             else:
-                task = console.input("\n[brand]❯ Enter task:[/brand] ").strip()
+                task = _prompt_input("\n> Enter task: ")
         except EOFError:
             break
         except KeyboardInterrupt:

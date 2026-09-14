@@ -1,8 +1,8 @@
 """Credential / API-key management, persisted in .sova/credentials.json."""
 import json
 import os
-from typing import Optional
-
+import re
+from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -14,22 +14,42 @@ def _credentials_path(root_dir: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Placeholder detection
+# ---------------------------------------------------------------------------
+
+def is_placeholder(value: Optional[str]) -> bool:
+    """Return True if *value* is empty, None, or a default placeholder string."""
+    if not value or not isinstance(value, str):
+        return True
+    val = value.strip().lower()
+    if not val:
+        return True
+    if val.startswith("your_") or val.endswith("_here") or "your_groq_api_key" in val or "your_openai" in val:
+        return True
+    if val in ("your_api_key", "your_groq_api_key_here", "your_nvidia_api_key_here", "your_openai_api_key_here"):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Load / Save (atomic write, same pattern as sessions.py)
 # ---------------------------------------------------------------------------
 
-def load_credentials(root_dir: str) -> dict:
-    """Read and return all saved credentials.  Returns ``{}`` if the file does not exist."""
-    path = _credentials_path(root_dir)
+def load_credentials(root_dir: Optional[str] = None) -> Dict[str, str]:
+    """Read and return all saved credentials. Returns {} if file missing or corrupt."""
+    root = root_dir or os.getcwd()
+    path = _credentials_path(root)
     if not os.path.isfile(path):
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            return {k: str(v) for k, v in data.items() if isinstance(v, str)}
     except (json.JSONDecodeError, OSError):
         return {}
 
 
-def save_credentials(root_dir: str, credentials: dict) -> None:
+def save_credentials(root_dir: str, credentials: Dict[str, str]) -> None:
     """Atomic-write *credentials* dict to ``.sova/credentials.json``."""
     path = _credentials_path(root_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -40,44 +60,57 @@ def save_credentials(root_dir: str, credentials: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Single-key helpers
+# Key Resolution & Mutation
 # ---------------------------------------------------------------------------
 
+def get_active_credential(key: str, root_dir: Optional[str] = None) -> Optional[str]:
+    """Return the active credential for *key*, enforcing precedence:
+    1. Saved UI credential in .sova/credentials.json (if valid & not placeholder)
+    2. Environment variable in os.environ (if valid & not placeholder)
+    """
+    root = root_dir or os.getcwd()
+    saved = load_credentials(root).get(key)
+    if saved and not is_placeholder(saved):
+        return saved.strip()
+
+    env_val = os.environ.get(key)
+    if env_val and not is_placeholder(env_val):
+        return env_val.strip()
+
+    return None
+
+
 def get_credential(root_dir: str, key: str) -> Optional[str]:
-    """Fetch a single credential value by *key* name, or ``None`` if absent."""
-    return load_credentials(root_dir).get(key)
+    """Fetch a single stored credential value by *key* name."""
+    return get_active_credential(key, root_dir)
 
 
 def set_credential(root_dir: str, key: str, value: str) -> None:
-    """Set a single credential, merge into the existing store, and persist."""
+    """Set a single credential, update .sova/credentials.json, and sync os.environ."""
     creds = load_credentials(root_dir)
-    creds[key] = value
+    clean_val = value.strip()
+    creds[key] = clean_val
     save_credentials(root_dir, creds)
+    os.environ[key] = clean_val
 
 
 def delete_credential(root_dir: str, key: str) -> bool:
-    """Remove a credential by *key*.  Return ``True`` if the key existed."""
+    """Remove a credential by *key*. Syncs both file storage and os.environ."""
     creds = load_credentials(root_dir)
-    if key not in creds:
-        return False
-    del creds[key]
-    save_credentials(root_dir, creds)
-    return True
+    existed = key in creds
+    if key in creds:
+        del creds[key]
+        save_credentials(root_dir, creds)
+    os.environ.pop(key, None)
+    return existed or (key in os.environ)
 
-
-# ---------------------------------------------------------------------------
-# Environment injection
-# ---------------------------------------------------------------------------
 
 def apply_credentials(root_dir: str) -> None:
-    """Load all credentials and inject them into ``os.environ``.
-
-    Only sets env vars that are **not** already present so that explicit
-    environment variables are never overridden.
-    """
-    for key, value in load_credentials(root_dir).items():
-        if key not in os.environ:
-            os.environ[key] = value
+    """Load stored credentials and inject non-placeholder values into os.environ."""
+    creds = load_credentials(root_dir)
+    for key, value in creds.items():
+        if value and not is_placeholder(value):
+            os.environ[key] = value.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -85,27 +118,25 @@ def apply_credentials(root_dir: str) -> None:
 # ---------------------------------------------------------------------------
 
 def mask_value(value: str) -> str:
-    """Return a masked version of *value* suitable for display.
-
-    * Length ≤ 8  → ``'****'``
-    * Otherwise   → ``'****'`` + last 4 characters
-    """
+    """Return a masked version of *value* suitable for display."""
+    if not value or is_placeholder(value):
+        return ""
     if len(value) <= 8:
-        return "****"
-    return "****" + value[-4:]
+        return "••••••••"
+    return "••••••••" + value[-4:]
 
 
 # ---------------------------------------------------------------------------
-# Known / suggested keys
+# Known / suggested keys catalog
 # ---------------------------------------------------------------------------
 
-def get_known_keys() -> list[dict]:
+def get_known_keys() -> List[Dict[str, str]]:
     """Return a list of dicts describing known / suggested credential keys."""
     return [
-        {"key": "GROQ_API_KEY", "label": "Groq API Key", "category": "llm", "hint": "Get from console.groq.com"},
-        {"key": "OPENAI_API_KEY", "label": "OpenAI API Key", "category": "llm", "hint": "Get from platform.openai.com"},
-        {"key": "NVIDIA_API_KEY", "label": "Nvidia API Key", "category": "llm", "hint": "Get from build.nvidia.com"},
-        {"key": "SOVA_OLLAMA_HOST", "label": "Ollama Host URL", "category": "llm", "hint": "Default: http://localhost:11434"},
+        {"key": "GROQ_API_KEY", "label": "Groq API Key", "category": "llm", "hint": "console.groq.com"},
+        {"key": "OPENAI_API_KEY", "label": "OpenAI API Key", "category": "llm", "hint": "platform.openai.com"},
+        {"key": "NVIDIA_API_KEY", "label": "Nvidia NIM API Key", "category": "llm", "hint": "build.nvidia.com"},
+        {"key": "SOVA_OLLAMA_HOST", "label": "Ollama Host URL", "category": "llm", "hint": "http://localhost:11434"},
     ]
 
 
@@ -113,63 +144,55 @@ def get_known_keys() -> list[dict]:
 # Credential testing
 # ---------------------------------------------------------------------------
 
-def test_credential(root_dir: str, key: str) -> dict:
-    """Test whether a stored credential is valid.
+def test_credential(root_dir: str, key: str, value: Optional[str] = None) -> dict:
+    """Test whether a credential value (or stored active key) is valid."""
+    target_val = value.strip() if value and value.strip() else get_active_credential(key, root_dir)
 
-    Returns ``{"ok": bool, "message": str}``.
-
-    * ``GROQ_API_KEY``    – creates an OpenAI client with the Groq base URL and lists models.
-    * ``OPENAI_API_KEY``  – creates an OpenAI client and lists models.
-    * ``NVIDIA_API_KEY``  – creates an OpenAI client with the Nvidia base URL and lists models.
-    * ``SOVA_OLLAMA_HOST``– sends an HTTP GET to ``{host}/api/tags``.
-    * Unknown keys        – returns a generic success message.
-    """
-    value = get_credential(root_dir, key)
-    if value is None:
-        return {"ok": False, "message": f"No credential stored for {key}"}
+    if not target_val or is_placeholder(target_val):
+        return {"ok": False, "message": f"No valid API key specified for {key}"}
 
     if key == "GROQ_API_KEY":
-        return _test_openai_compatible(value, base_url="https://api.groq.com/openai/v1", label="Groq")
+        return _test_openai_compatible(target_val, base_url="https://api.groq.com/openai/v1", label="Groq")
 
     if key == "OPENAI_API_KEY":
-        return _test_openai_compatible(value, base_url=None, label="OpenAI")
+        return _test_openai_compatible(target_val, base_url=None, label="OpenAI")
 
     if key == "NVIDIA_API_KEY":
-        return _test_openai_compatible(value, base_url="https://integrate.api.nvidia.com/v1", label="Nvidia")
+        return _test_openai_compatible(target_val, base_url="https://integrate.api.nvidia.com/v1", label="Nvidia")
 
     if key == "SOVA_OLLAMA_HOST":
-        return _test_ollama(value)
+        return _test_ollama(target_val)
 
-    return {"ok": True, "message": "Saved (no test available)"}
+    return {"ok": True, "message": "Saved key configured"}
 
 
 def _test_openai_compatible(api_key: str, base_url: Optional[str], label: str) -> dict:
     """Try to list models via the OpenAI-compatible API."""
     try:
-        from openai import OpenAI  # type: ignore[import-untyped]
-
-        kwargs: dict = {"api_key": api_key}
+        from openai import OpenAI
+        kwargs: dict = {"api_key": api_key, "timeout": 8.0}
         if base_url:
             kwargs["base_url"] = base_url
         client = OpenAI(**kwargs)
         models = client.models.list()
         count = len(list(models))
-        return {"ok": True, "message": f"{label} OK – {count} model(s) available"}
+        return {"ok": True, "message": f"{label} connected ({count} models available)"}
     except Exception as exc:
-        return {"ok": False, "message": f"{label} error: {exc}"}
+        msg = str(exc)
+        if "401" in msg or "Authentication" in msg or "invalid_api_key" in msg:
+            return {"ok": False, "message": f"{label} authentication failed (401 Invalid Key)"}
+        return {"ok": False, "message": f"{label} test error: {msg[:120]}"}
 
 
 def _test_ollama(host: str) -> dict:
-    """Try an HTTP GET to the Ollama ``/api/tags`` endpoint."""
+    """Try an HTTP GET to the Ollama /api/tags endpoint."""
     try:
         import urllib.request
-        import urllib.error
-
         url = host.rstrip("/") + "/api/tags"
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
+        req = urllib.request.Request(url, method="GET", headers={"User-Agent": "sova"})
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
         count = len(data.get("models", []))
-        return {"ok": True, "message": f"Ollama OK – {count} model(s) available"}
+        return {"ok": True, "message": f"Ollama reachable ({count} models installed)"}
     except Exception as exc:
-        return {"ok": False, "message": f"Ollama error: {exc}"}
+        return {"ok": False, "message": f"Ollama offline or unreachable: {exc}"}

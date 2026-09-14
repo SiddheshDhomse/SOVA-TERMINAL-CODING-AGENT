@@ -162,6 +162,22 @@ class TestPrecisionEditAndLogger(unittest.TestCase):
         self.assertEqual(steps[0]["type"], "tool_call")
         self.assertEqual(steps[1]["type"], "tool_result")
 
+    def test_write_file_normalizes_double_escaped_newlines(self):
+        # LLMs occasionally pass literal \\n when intending multiline code
+        escaped_code = "def foo():\\n    return 42\\n"
+        self.impls["write_file"]("test_escaped.py", escaped_code)
+        read_back = self.impls["read_file"]("test_escaped.py")
+        self.assertIn("1: def foo():", read_back)
+        self.assertIn("2:     return 42", read_back)
+
+    def test_edit_file_normalizes_double_escaped_newlines(self):
+        self.impls["write_file"]("target.py", "def a():\n    pass\n")
+        res, diff = self.impls["edit_file"]("target.py", "pass", "x = 1\\n    return x")
+        self.assertIn("Edited", res)
+        read_back = self.impls["read_file"]("target.py")
+        self.assertIn("x = 1", read_back)
+        self.assertIn("return x", read_back)
+
 
 if __name__ == "__main__":
     unittest.main()

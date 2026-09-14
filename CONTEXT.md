@@ -44,16 +44,21 @@ SOVA- Terminal Agent/
 ├── pyproject.toml            # Packaging and CLI/Web entrypoints (sova, sova-web)
 ├── requirements.txt          # Python dependencies
 ├── CONTEXT.md                # [THIS FILE] Master project context for all coding agents
+├── ROADMAP.md                # Strategic development roadmap and progress tracking
 ├── agent/                    # Core agent engine
 │   ├── __init__.py           # Package marker
-│   ├── cli.py                # Claude Code-grade terminal CLI (Rich + prompt_toolkit)
+│   ├── checkpoints.py        # Granular file backup snapshots and LIFO /undo engine
+│   ├── cli.py                # Claude Code-grade terminal CLI (Rich + prompt_toolkit, /undo, /resume)
 │   ├── logger.py             # Centralized rotating logger & session trajectory recorder
 │   ├── llm.py                # Multi-provider client, model catalog, token budgeting, streaming
 │   ├── loop.py               # ReAct loop, token-budget compaction, 413 recovery, subagent spawner
 │   ├── prompts.py            # System prompts and behavior guidelines
-│   ├── sessions.py           # Session persistence (.sova/sessions/*.json)
-│   ├── tools.py              # Precision file editing, sandboxing checks, and process management
-│   └── web.py                # Claude Code-grade Web UI & API (ThreadingHTTPServer + SSE)
+│   ├── sandbox.py            # Git worktree sandbox isolation engine (.sova/worktrees/)
+│   ├── sessions.py           # Persistent session store (.sova/sessions/*.json) with full replay
+│   ├── subagents.py          # Role configs (Researcher, Coder, Reviewer), tool partitioning, prompts
+│   ├── symbols.py            # AST symbol extractor (Python, JS, TS, Go, Rust) & disk cache
+│   ├── tools.py              # Precision file editing, checkpoint hooks, symbols, process manager
+│   └── web.py                # Real-chatbot Web UI & API (Quiet server, session replay, /undo)
 ├── eval/                     # Evaluation harness
 │   ├── __init__.py           # Package marker
 │   ├── swebench_runner.py    # SWE-bench Lite runner (git add -A + git diff --cached -> predictions.jsonl)
@@ -63,12 +68,20 @@ SOVA- Terminal Agent/
 │       ├── tasks.py          # Synthetic challenge definitions
 │       └── run_toy_eval.py   # Local runner asserting task completion
 ├── .sova/                    # Runtime artifacts (gitignored)
+│   ├── checkpoints/          # File modification snapshots (<session_id>/snapshots/ & history.json)
 │   ├── history               # CLI prompt_toolkit input history
+│   ├── jobs/                 # Logs for background shell jobs
 │   ├── logs/                 # Central sova.log and <session_id>.trajectory.jsonl
 │   ├── memory.md             # Cross-session persistent notes
-│   ├── jobs/                 # Logs for background shell jobs
-│   └── sessions/             # Saved session JSON files
-└── tests / test_*.py         # Unit tests (test_agent_tools.py, test_llm_models.py, test_providers.py)
+│   ├── sessions/             # Saved full session JSON files
+│   ├── symbols_cache.json    # AST index cache keyed by file mtime
+│   └── worktrees/            # Isolated Git worktrees for sandbox task execution
+└── tests / test_*.py         # Unit test suites (46/46 passing)
+    ├── test_agent_tools.py   # Tools, syntax validation, newline recovery
+    ├── test_checkpoints.py   # Snapshots, rollback, file creation/edit undo
+    ├── test_sandbox.py       # Git worktree creation, diffs, squash merge, discard
+    ├── test_sessions.py      # Session persistence, ordering, full replay loading
+    └── test_symbols.py       # AST symbol extraction, caching, and outline queries
 ```
 
 ---
@@ -123,6 +136,24 @@ Frontends consume events emitted by `run_agent()`:
   - Nvidia: 32,000 tokens.
   - OpenAI: 64,000 tokens.
 
+### 4.3 Codebase Intelligence & AST Symbol Tools (`agent/symbols.py`)
+- **Incremental Indexing**: Background scans code files and caches symbols in `.sova/symbols_cache.json` keyed by `mtime`.
+- **`get_outline(path)`**: Returns compact architectural outlines of classes, functions, methods, signatures, and line bounds in ~120 tokens.
+- **`find_definition(symbol, path=None)`**: Locates where classes/functions are declared across the project in 1 turn.
+- **`find_references(symbol, path=None)`**: Finds usages across project files, annotating `[DEF]` lines.
+- **`workspace_summary()`**: Auto-detects project stack, test runners, entry points, and symbol statistics; automatically injected into system prompt on session boot.
+
+### 4.4 Sub-Agent Hierarchy & Teamwork Orchestration (`agent/subagents.py`)
+- **Specialized Roles**:
+  - **`researcher`**: Read-only codebase exploration (`read_file`, `list_dir`, `find_files`, `grep`, `get_outline`, `find_definition`, `find_references`, `workspace_summary`). Zero file edit or shell execution privileges. Iteration budget: 8.
+  - **`coder`**: Precision editing, new file creation, and local test execution (`write_file`, `edit_file`, `run_shell`, `undo`). Protected by CheckpointManager snapshots. Iteration budget: 10.
+  - **`reviewer`**: Quality assurance, diff inspection, and test runner execution with zero code modification privileges. Iteration budget: 6.
+  - **`general`**: Multi-purpose subagent fallback. Iteration budget: 8.
+- **Depth-1 Enforced Safety**: Subagents cannot recursively call `spawn_subagent`, preventing runaway execution loops.
+- **Visual Frontends**:
+  - **CLI**: Rich hierarchical branch tree (`├──` / `└──`) with distinct role color badges and indented tool progress.
+  - **Web UI**: Collapsible `.subagent-card` elements in the chat feed and a dedicated **Sub-Agents** tab in the Right Drawer tracking live status and execution summaries.
+
 ---
 
 ## 5. Development & Testing Conventions
@@ -147,3 +178,5 @@ cp .env.example .env
 1. **Preserve Tool Call / Tool Result Invariants**: Never delete or isolate an assistant message with `tool_calls` without also removing or updating its corresponding `role: "tool"` responses.
 2. **Cross-Platform File Operations**: Always normalize `\r\n` to `\n` in string matching to maintain compatibility between Windows and POSIX environments.
 3. **Token Prudence**: Never uncap tool output. If reading or listing large directories, paginate or instruct the model to use line bounds.
+4. **LLM Literal Newline Defense**: Code written via `write_file` and `edit_file` runs through `_normalize_content` to auto-repair double-escaped `\\n` sequences emitted by models when retrying tool calls.
+5. **Namespaced Tool Resolution**: The execution loop falls back to short tool names (e.g., `repo_browser.list_dir` -> `list_dir`) to maintain compatibility across different model training corpora.
