@@ -437,25 +437,42 @@ def _handle_command(task: str, model_override: list, conversation: list, root_di
         current_prov = llm.get_provider()
         recommended = llm.get_models_for_provider(current_prov)
         if len(parts) > 1 and parts[1].strip():
-            chosen = parts[1].strip()
+            raw_chosen = parts[1].strip()
+            if raw_chosen.lower() in ("auto-free", "auto free", "autofree", "free"):
+                if current_prov != "openrouter":
+                    os.environ["SOVA_PROVIDER"] = "openrouter"
+                    current_prov = "openrouter"
+                    console.print("Switched provider to '[bold]openrouter[/bold]'", style="muted")
+                chosen = "openrouter/free"
+            else:
+                chosen = llm.normalize_model(raw_chosen, current_prov) or raw_chosen
         else:
             lines = []
             for i, m in enumerate(recommended, start=1):
-                active_mark = " (active)" if m == llm.get_model() else ""
-                lines.append(f"  [bright_cyan]{i}[/bright_cyan] {m}{active_mark}")
+                active_mark = " (active)" if m == (model_override[0] or llm.get_model()) else ""
+                free_badge = " [bold green][FREE][/bold green]" if (":free" in m or m == "openrouter/free") else ""
+                lines.append(f"  [bright_cyan]{i}[/bright_cyan] {m}{free_badge}{active_mark}")
+            lines.append("  [bright_cyan]f[/bright_cyan] openrouter/free [bold green][FREE][/bold green] (Auto-Free Tier - 100% Free)")
             lines.append("  [bright_cyan]c[/bright_cyan] Enter custom model name...")
             console.print(Panel("\n".join(lines), title=f"[bold bright_cyan]Select Model for '{current_prov}'[/bold bright_cyan]", border_style="bright_cyan"))
-            choice = _prompt_input("[bold bright_cyan]> Select [1-N, 'c' for custom, Enter to cancel]: [/bold bright_cyan]")
+            choice = _prompt_input("[bold bright_cyan]> Select [1-N, 'f' for auto-free, 'c' for custom, Enter to cancel]: [/bold bright_cyan]").strip()
             if not choice:
                 return True
-            if choice.isdigit() and 1 <= int(choice) <= len(recommended):
+            if choice.lower() in ("f", "auto-free", "auto free", "autofree", "free"):
+                if current_prov != "openrouter":
+                    os.environ["SOVA_PROVIDER"] = "openrouter"
+                    current_prov = "openrouter"
+                    console.print("Switched provider to '[bold]openrouter[/bold]'", style="muted")
+                chosen = "openrouter/free"
+            elif choice.isdigit() and 1 <= int(choice) <= len(recommended):
                 chosen = recommended[int(choice) - 1]
             elif choice.lower() == "c":
-                chosen = _prompt_input("[bold bright_cyan]Enter custom model name: [/bold bright_cyan]")
+                chosen = _prompt_input("[bold bright_cyan]Enter custom model name: [/bold bright_cyan]").strip()
                 if not chosen:
                     return True
+                chosen = llm.normalize_model(chosen, current_prov) or chosen
             else:
-                chosen = choice
+                chosen = llm.normalize_model(choice, current_prov) or choice
 
         model_override[0] = chosen
         console.print(f"Switched model to '[bold]{chosen}[/bold]'", style="muted")
@@ -723,8 +740,19 @@ def main():
     if args.provider:
         os.environ["SOVA_PROVIDER"] = args.provider
 
+    current_prov = os.environ.get("SOVA_PROVIDER", "groq")
+    resolved_model = args.model
+    if args.model:
+        raw_m = args.model.strip().lower()
+        if raw_m in ("auto-free", "auto free", "autofree", "free"):
+            os.environ["SOVA_PROVIDER"] = "openrouter"
+            current_prov = "openrouter"
+            resolved_model = "openrouter/free"
+        else:
+            resolved_model = llm.normalize_model(args.model, current_prov) or args.model
+
     root_dir = os.getcwd()
-    model_override = [args.model]
+    model_override = [resolved_model]
     conversation = [None]
     session_ref = [sessions.new_session_id()]
     sandbox_ref = [None]

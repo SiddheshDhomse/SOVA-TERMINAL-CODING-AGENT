@@ -116,10 +116,17 @@ class TestProviderCredentials(unittest.TestCase):
 
     def test_test_credential_auth_failure(self):
         with patch("openai.OpenAI") as mock_openai:
-            mock_openai.side_effect = Exception("401 Authentication failed: invalid_api_key")
+            mock_openai.side_effect = Exception("401 Authentication error")
             res = credentials.test_credential(".", "OPENROUTER_API_KEY", "bad-key")
             self.assertFalse(res["ok"])
-            self.assertIn("authentication failed", res["message"])
+            self.assertIn("401 Invalid Key", res["message"])
+
+    def test_open_route_api_key_alias(self):
+        with patch.dict(os.environ, {"OPEN_ROUTE_API_KEY": "sk-or-v1-alias-key"}, clear=True):
+            val = credentials.get_active_credential("OPENROUTER_API_KEY")
+            self.assertEqual(val, "sk-or-v1-alias-key")
+            val_direct = credentials.get_active_credential("OPEN_ROUTE_API_KEY")
+            self.assertEqual(val_direct, "sk-or-v1-alias-key")
 
 
 if __name__ == "__main__":

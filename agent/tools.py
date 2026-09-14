@@ -462,6 +462,25 @@ def build_tools(root_dir, session_id=None):
             start_line = line_start
         if line_end is not None and end_line is None:
             end_line = line_end
+
+        def _clean_line_no(val):
+            if val is None:
+                return None
+            if isinstance(val, str):
+                val_s = val.strip().lower()
+                if val_s in ("none", "null", ""):
+                    return None
+                try:
+                    return int(val)
+                except ValueError:
+                    return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        start_line = _clean_line_no(start_line)
+        end_line = _clean_line_no(end_line)
         full = _resolve(path)
         if not old_str:
             return (

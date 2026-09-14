@@ -49,7 +49,7 @@ PROVIDERS_CONFIG = {
         "default": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "recommended": [
             "nvidia/nemotron-3.5-lightning-30b-a3b",
-            "meta/llama-3.3-70b-instruct",
+            "meta/llama-3.2-11b-vision-instruct",
             "mistralai/mistral-large-2-instruct",
         ],
         "default_budget": 32000,
@@ -79,14 +79,15 @@ PROVIDERS_CONFIG = {
         "name": "OpenRouter (Claude, Gemini, DeepSeek)",
         "default": "anthropic/claude-3.7-sonnet",
         "recommended": [
+            "openrouter/free",
+            "nvidia/nemotron-3.5-lightning:free",
+            "google/gemma-4-31b-it:free",
+            "nex-agi/nex-n2.5-mini:free",
+            "poolside/laguna-s-2.1:free",
             "anthropic/claude-3.7-sonnet",
             "anthropic/claude-3.5-sonnet",
-            "google/gemini-2.5-pro",
-            "google/gemini-2.5-flash",
             "deepseek/deepseek-r1",
-            "deepseek/deepseek-chat",
             "openai/gpt-4o",
-            "openai/o3-mini",
         ],
         "default_budget": 64000,
     },
@@ -110,6 +111,24 @@ MODEL_ALIASES = {
         "llama3-70b-8192": "openai/gpt-oss-120b",
         "llama 3.1 8b instant": "llama-3.1-8b-instant",
         "llama-3.1-8b-instant": "llama-3.1-8b-instant",
+    },
+    "nvidia": {
+        "nemotron": "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nemotron-3.5": "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "llama-3.2-11b": "meta/llama-3.2-11b-vision-instruct",
+        "llama 3.2 11b": "meta/llama-3.2-11b-vision-instruct",
+    },
+    "openrouter": {
+        "free": "openrouter/free",
+        "auto-free": "openrouter/free",
+        "auto free": "openrouter/free",
+        "autofree": "openrouter/free",
+        "nemotron-free": "nvidia/nemotron-3.5-lightning:free",
+        "gemma-free": "google/gemma-4-31b-it:free",
+        "nex-free": "nex-agi/nex-n2.5-mini:free",
+        "laguna-free": "poolside/laguna-s-2.1:free",
+        "llama-free": "meta-llama/llama-3.3-70b-instruct:free",
+        "deepseek-free": "deepseek/deepseek-r1:free",
     },
 }
 
@@ -246,7 +265,7 @@ def get_client() -> OpenAI:
     elif provider == "openrouter":
         api_key = _creds.get_active_credential("OPENROUTER_API_KEY")
         if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is not set or invalid. Please add your OpenRouter API key in Settings or .env file.")
+            raise RuntimeError("OPENROUTER_API_KEY is not set (you can also use OPEN_ROUTE_API_KEY). Please add your OpenRouter API key in Settings or .env file.")
         base_url = "https://openrouter.ai/api/v1"
     else:
         raise RuntimeError(f"Unknown SOVA_PROVIDER '{provider}'. Use 'groq', 'ollama', 'nvidia', 'openai', 'gemini', or 'openrouter'.")

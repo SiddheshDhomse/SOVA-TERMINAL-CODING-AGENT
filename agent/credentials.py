@@ -63,19 +63,40 @@ def save_credentials(root_dir: str, credentials: Dict[str, str]) -> None:
 # Key Resolution & Mutation
 # ---------------------------------------------------------------------------
 
+CREDENTIAL_KEY_ALIASES = {
+    "OPENROUTER_API_KEY": [
+        "OPENROUTER_API_KEY",
+        "OPEN_ROUTE_API_KEY",
+        "OPEN_ROUTER_API_KEY",
+        "OPENROUTE_API_KEY",
+    ],
+    "OPEN_ROUTE_API_KEY": [
+        "OPEN_ROUTE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPEN_ROUTER_API_KEY",
+        "OPENROUTE_API_KEY",
+    ],
+}
+
+
 def get_active_credential(key: str, root_dir: Optional[str] = None) -> Optional[str]:
     """Return the active credential for *key*, enforcing precedence:
     1. Saved UI credential in .sova/credentials.json (if valid & not placeholder)
     2. Environment variable in os.environ (if valid & not placeholder)
     """
     root = root_dir or os.getcwd()
-    saved = load_credentials(root).get(key)
-    if saved and not is_placeholder(saved):
-        return saved.strip()
+    keys_to_check = CREDENTIAL_KEY_ALIASES.get(key, [key])
 
-    env_val = os.environ.get(key)
-    if env_val and not is_placeholder(env_val):
-        return env_val.strip()
+    saved_dict = load_credentials(root)
+    for k in keys_to_check:
+        saved = saved_dict.get(k)
+        if saved and not is_placeholder(saved):
+            return saved.strip()
+
+    for k in keys_to_check:
+        env_val = os.environ.get(k)
+        if env_val and not is_placeholder(env_val):
+            return env_val.strip()
 
     return None
 
@@ -162,7 +183,7 @@ def test_credential(root_dir: str, key: str, value: Optional[str] = None) -> dic
     if key == "GEMINI_API_KEY":
         return _test_openai_compatible(target_val, base_url="https://generativelanguage.googleapis.com/v1beta/openai/", label="Google Gemini")
 
-    if key == "OPENROUTER_API_KEY":
+    if key in ("OPENROUTER_API_KEY", "OPEN_ROUTE_API_KEY", "OPEN_ROUTER_API_KEY", "OPENROUTE_API_KEY"):
         return _test_openai_compatible(target_val, base_url="https://openrouter.ai/api/v1", label="OpenRouter")
 
     if key == "NVIDIA_API_KEY":

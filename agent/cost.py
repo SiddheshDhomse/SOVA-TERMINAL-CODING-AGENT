@@ -52,6 +52,9 @@ def calculate_turn_cost(
     prov = (provider or "groq").lower()
     mod = (model or "").lower()
 
+    if ":free" in mod or mod.endswith(":free"):
+        return 0.0
+
     prov_table = MODEL_PRICING.get(prov, MODEL_PRICING["groq"])
     prompt_rate, completion_rate = prov_table.get(mod, prov_table["default"])
 

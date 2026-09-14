@@ -286,12 +286,19 @@ def format_scorecard(suite: BenchmarkSuiteResult) -> str:
 
 
 def main():
+    from dotenv import load_dotenv
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="SOVA SWE-Bench & Benchmark Runner")
+    parser.add_argument("--provider", "-p", help="Provider override (groq, nvidia, gemini, openrouter, etc)")
     parser.add_argument("--dataset", help="Path to SWE-bench format JSON or JSONL dataset file")
     parser.add_argument("--model", help="Model override for benchmark runs")
     parser.add_argument("--max-iterations", type=int, default=15, help="Max turns per task")
     parser.add_argument("--dry-run", action="store_true", help="Print benchmark setup without calling LLM")
     args = parser.parse_args()
+
+    if args.provider:
+        os.environ["SOVA_PROVIDER"] = args.provider
 
     if args.dry_run:
         suite = BenchmarkSuiteResult(
